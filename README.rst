@@ -1,130 +1,96 @@
-Electron Cash - Lightweight Bitcoin Cash client
-=====================================
+Electron-Cash-Satochip - Lightweight Bitcoin Cash client for the Satochip Hardware Wallet
+==========================================================================================
 
 ::
 
   Licence: MIT Licence
-  Author: Jonald Fyookball
-  Language: Python
-  Homepage: https://electroncash.org/
+  Author: Jonald Fyookball modified by Toporin 
+  Language: Python (>= 3.6)
+  Homepage: 
 
+Introduction
+============
 
-.. image:: https://d322cqt584bo4o.cloudfront.net/electron-cash/localized.svg
-    :target: https://crowdin.com/project/electron-cash
-    :alt: Help translate Electron Cash online
+This is a fork of Electron Cash modified for use with the Satochip Hardware Wallet. To use it, you need a device with the Satochip Javacard Applet installed.
+If the wallet is not intialized yet, Electron Cash will perform the setup (you only need to do this once). During setup, a seed is created: this seed allows you to recover your wallet at anytime, so make sure to BACKUP THE SEED SECURELY! During setup, a PIN code is also created: this PIN allows to unlock th device to access your funds. If you try too many wrong PIN, your device will be locked indefinitely (it is 'bricked'). If you loose your PIN or brick your device, you can only recover your funds with the seed backup.
 
+The Satochip wallet is currently in Beta, use with caution! In this phase, it is recommended to use the software on the Bitcoin testnet only.
+This software is provided 'as-is', without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
 
+Rem: Electron Cash uses Python 3.x. In case of error, check first that you are not trying to run Electron Cash with Python 2.x or with Python 2.x libraries.
 
+Development version (Windows 64bits)
+=====================================
 
+Install the latest python 3.6 release from https://www.python.org (https://www.python.org/downloads/release/python-368/)
+(Caution: installing another release than 3.6 may cause incompatibility issues with pyscard)
 
-Getting started
-===============
+Clone or download the code from GitHub.
 
-*Note: If running from source, Python 3.6 or above is required to run Electron Cash. If your system lacks Python 3.6, 
-you have other options, such as the* `binary releases <https://github.com/Electron-Cash/Electron-Cash/releases/>`_.
+Open a PowerShell command line in the Electron-Cash folder
 
-Electron Cash is a pure python application forked from Electrum. If you want to use the Qt interface, install the Qt dependencies::
+In PowerShell, install the Electron-Cash dependencies::
+
+    python -m pip install .   
+    
+You may also ned to install Python3-pyqt5::
+
+    python -m pip install pyqt5
+    
+Install pyscard from https://pyscard.sourceforge.io/
+Pyscard is required to connect to the smartcard::
+
+    python -m pip install pyscard
+    
+In case of error message, you may also install pyscard from the installer:
+Download the .whl files from https://sourceforge.net/projects/pyscard/files/pyscard/pyscard%201.9.7/ and run::
+
+    python -m pip install pyscard-1.9.7-cp36-cp36m-win_amd64.whl
+
+In PowerShell, run Electron Cash on the testnet (-v allows for verbose output)::
+
+    python .\electron-cash  -v --testnet
+    
+
+Development version (Ubuntu)
+==============================
+(Electron Cash requires Python 3.6, which should be installed by default on Ubuntu)
+(If necessary, install pip: sudo apt-get install python3-pip)
+
+Electron Cash is a pure python application. To use the
+Qt interface, install the Qt dependencies::
 
     sudo apt-get install python3-pyqt5
 
-If you downloaded the official package (tar.gz), you can run
-Electron Cash from its root directory (called Electrum), without installing it on your
-system; all the python dependencies are included in the 'packages'
-directory. To run Electron Cash from its root directory, just do::
-
-    ./electron-cash
-
-You can also install Electron Cash on your system, by running this command::
-
-    sudo apt-get install python3-setuptools
-    python3 setup.py install
-
-This will download and install the Python dependencies used by
-Electron Cash, instead of using the 'packages' directory.
-
-If you cloned the git repository, you need to compile extra files
-before you can run Electron Cash. Read the next section, "Development
-Version".
-
-Hardware Wallet - Ledger Nano S
--------------------------------
-
-Electron Cash natively support Ledger Nano S hardware wallet. If you plan to use
-you need an additional dependency, namely btchip. To install it run this command::
-
-    sudo pip3 install btchip-python
-
-If you still have problems connecting to your Nano S please have a look at this
-`troubleshooting <https://support.ledger.com/hc/en-us/articles/115005165269-Fix-connection-issues>`_ section on Ledger website.
-
-
-Development version
-===================
-
-Check out the code from Github::
-
-    git clone https://github.com/Electron-Cash/Electron-Cash
-    cd Electron-Cash
-
+Check out the code from GitHub::
+    
+    git clone https://github.com/Toporin/Electron-Cash-Satochip.git 
+    cd Electron-Cash-Satochip
+    
+In the Electron-Cash folder:    
+    
 Run install (this should install dependencies)::
 
-    python3 setup.py install
+    python3 -m pip install .
+    
+Install pyscard (https://pyscard.sourceforge.io/)
+Pyscard is required to connect to the smartcard:: 
+    sudo apt-get install pcscd
+    sudo apt-get install python3-pyscard
+(For alternatives, see https://github.com/LudovicRousseau/pyscard/blob/master/INSTALL.md for more detailed installation instructions)
 
-or for Debian based systems ( tested on Debian v9 Stretch )::
+ 
+To run Electron Cash use::
+ python3 electron-cash  -v --testnet
+ 
+ 
+Test suite
+=============
+ 
+To run the test suite, run::
 
-    sudo apt update
-    sudo apt install python3-dnspython python3-pyaes libsecp256k1-0 python3-protobuf python3-jsonrpclib-pelix python3-ecdsa python3-qrcode python3-pyqt5 python3-socks
-
-Then
-
-Compile the protobuf description file::
-
-    sudo apt-get install protobuf-compiler
-    protoc --proto_path=lib/ --python_out=lib/ lib/paymentrequest.proto
-
-Create translations (optional)::
-
-    sudo apt-get install python-requests gettext
-    ./contrib/make_locale
-
-Compile libsecp256k1 (optional, yet highly recommended)::
-
-    ./contrib/make_secp
-
-For plugin development, see the `plugin documentation <plugins/README.rst>`_.
-
-Running unit tests::
-
-    pip install tox
-    tox
-
-Tox will take care of building a faux installation environment, and ensure that
-the mapped import paths work correctly.
-
-Creating Binaries
-=================
-
-Linux AppImage & Source Tarball
---------------
-
-See `contrib/build-linux/README.md <contrib/build-linux/README.md>`_.
-
-Mac OS X / macOS
---------
-
-See `contrib/osx/ <contrib/osx/>`_.
-
-Windows
--------
-
-See `contrib/build-wine/ <contrib/build-wine>`_.
-
-Android
--------
-
-See `android/ <android/>`_.
-
-iOS
--------
-
-See `ios/ <ios/>`_.
+    python -m unittest plugins.satochip.test_CardConnector
+ 
+The test suite uses the following default PIN code: "12345678".
+If you run the test suite after (or before) Electron Cash, you may block the card if the PIN used are not the same!
+If the card is locked, you will have to reinstall the javacard applet on the card.

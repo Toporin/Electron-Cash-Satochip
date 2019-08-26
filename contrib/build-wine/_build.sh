@@ -141,6 +141,11 @@ prepare_wine() {
         PYINSTALLER_REPO='https://github.com/EchterAgo/pyinstaller.git'
         PYINSTALLER_COMMIT=d1cdd726d6a9edc70150d5302453fb90fdd09bf2
 
+        #DebugSatochip pyscard
+        PYSCARD_FILENAME=pyscard-1.9.8-cp36-cp36m-win32.whl #python32-bits
+        PYSCARD_URL=https://ci.appveyor.com/api/buildjobs/j60tkykj6vh0ppiy/artifacts/dist%2Fpyscard-1.9.8-cp36-cp36m-win32.whl
+        PYSCARD_SHA256=4641b5db53fb3562671b7b7c685ddf8f715180e2809106fb2a9361dfad553b4b        
+        
         ## These settings probably don't need change
         export WINEPREFIX=/opt/wine64
         #export WINEARCH='win32'
@@ -238,7 +243,12 @@ prepare_wine() {
         mkdir -p $WINEPREFIX/drive_c/tmp
         cp "$here"/../secp256k1/libsecp256k1.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libsecp to its destination"
         cp "$here"/../zbar/libzbar-0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libzbar to its destination"
-
+        
+        info "Installing pyscard..." #DebugSatochip 
+        wget -O pyscard.whl "$PYSCARD_URL"
+        verify_hash pyscard.whl "$PYSCARD_SHA256"
+        $PYTHON -m pip install pyscard.whl #"$CACHEDIR/pyscard.whl"
+        
         popd
 
     ) || fail "Could not prepare Wine"

@@ -19,6 +19,8 @@ hiddenimports += ['PyQt5.sip']
 hiddenimports += collect_submodules('trezorlib')
 hiddenimports += collect_submodules('btchip')
 hiddenimports += collect_submodules('keepkeylib')
+hiddenimports += collect_submodules('satochip') #Satochip
+hiddenimports += collect_submodules('smartcard') #Satochip
 
 # Add libusb binary
 binaries = [("c:/tmp/libusb-1.0.dll", ".")]
@@ -50,6 +52,7 @@ datas = [
     (home+'lib/locale', 'electroncash/locale'),
     (home+'gui/qt/data', 'electroncash_gui/qt/data'),
     (home+'plugins', 'electroncash_plugins'),
+    (PYHOME+'\\Lib\\site-packages\\smartcard\\scard\\_scard.cp36-win32.pyd', '.\\smartcard\\scard\\'), #Satochip
 ]
 datas += collect_data_files('trezorlib')
 datas += collect_data_files('btchip')
@@ -74,6 +77,7 @@ a = Analysis([home+'electron-cash',
               home+'plugins/trezor/qt.py',
               home+'plugins/keepkey/qt.py',
               home+'plugins/ledger/qt.py',
+              home+'plugins/satochip/qt.py', #Satochip
               #home+'packages/requests/utils.py'
               ],
              binaries=binaries,
@@ -131,7 +135,8 @@ exe_standalone = EXE(
     strip=None,
     upx=False,
     icon=home+'icons/electron.ico',
-    console=False)
+    console=True) #Satochip True
+
 
 exe_portable = EXE(
     pyz,
@@ -143,7 +148,7 @@ exe_portable = EXE(
     strip=None,
     upx=False,
     icon=home+'icons/electron.ico',
-    console=False)
+    console=True) #Satochip True
 
 #####
 # exe and separate files that NSIS uses to build installer "setup" exe

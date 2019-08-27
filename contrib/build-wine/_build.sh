@@ -245,9 +245,9 @@ prepare_wine() {
         cp "$here"/../zbar/libzbar-0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libzbar to its destination"
         
         info "Installing pyscard..." #DebugSatochip 
-        wget -O pyscard.whl "$PYSCARD_URL"
-        verify_hash pyscard.whl "$PYSCARD_SHA256"
-        $PYTHON -m pip install pyscard.whl #"$CACHEDIR/pyscard.whl"
+        wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
+        verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
+        $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
         
         popd
 

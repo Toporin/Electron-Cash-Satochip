@@ -245,9 +245,9 @@ prepare_wine() {
         cp "$here"/../zbar/libzbar-0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libzbar to its destination"
         
         info "Installing pyscard..." #DebugSatochip 
-        wget -O pyscard.whl "$PYSCARD_URL"
-        verify_hash pyscard.whl "$PYSCARD_SHA256"
-        $PYTHON -m pip install pyscard.whl #"$CACHEDIR/pyscard.whl"
+        wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
+        verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
+        $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
         
         popd
 
@@ -329,7 +329,8 @@ build_the_app() {
         wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electron-cash.nsi || fail "makensis failed"
 
         cd dist
-        mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
+        #mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
+        mv Electron-Cash-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory" #Satochip 
 
         popd
 

@@ -102,7 +102,7 @@ class CardConnector:
                 (response, sw1, sw2)= self.cardservice.connection.transmit(apdu)
             return (response, sw1, sw2)
         except CardConnectionException: 
-            # may be the card has been removed
+            # maybe the card has been removed
             try:
                 self.cardrequest = CardRequest(timeout=10, cardType=self.cardtype)
                 self.cardservice = self.cardrequest.waitforcard()
@@ -111,6 +111,12 @@ class CardConnector:
                 self.cardservice.connection.addObserver(self.observer)
                 # connect to the card and perform a few transmits
                 self.cardservice.connection.connect()
+                # retransmit apdu
+                (response, sw1, sw2) = self.cardservice.connection.transmit(apdu)
+                if (sw1==0x9C) and (sw2==0x06):
+                    (response, sw1, sw2)= self.card_verify_PIN() 
+                    (response, sw1, sw2)= self.cardservice.connection.transmit(apdu)
+                return (response, sw1, sw2)
             except CardRequestTimeoutException:
                 print_error('time-out: no card inserted during last 10s')
             except Exception as exc:

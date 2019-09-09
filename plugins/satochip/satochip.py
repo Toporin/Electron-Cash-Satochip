@@ -305,7 +305,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
                         # decrypt and parse reply to extract challenge response
                         try: 
                             reply_encrypt= d['reply_encrypt']
-                        except exception as e:
+                        except Exception as e:
                             self.give_error("No response received from 2FA.\nPlease ensure that the Satochip-2FA plugin is enabled in Tools>Optional Features", True)
                         if reply_encrypt is None:
                             #todo: abort tx

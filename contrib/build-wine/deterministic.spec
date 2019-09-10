@@ -10,7 +10,7 @@ for i, x in enumerate(sys.argv):
 else:
     raise BaseException('no name')
 
-
+PYHOME = 'c:/python3.6.8'
 home = 'C:\\electroncash\\'
 
 # see https://github.com/pyinstaller/pyinstaller/issues/2005

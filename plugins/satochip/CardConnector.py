@@ -23,7 +23,7 @@ class LogCardConnectionObserver( CardConnectionObserver ):
         elif 'disconnect'==ccevent.type:
             print_error( 'disconnecting from ' + cardconnection.getReader())
         elif 'command'==ccevent.type:
-            if (ccevent.args[0][1] in (JCconstants.INS_SETUP, JCconstants.INS_BIP32_IMPORT_SEED, 
+            if (ccevent.args[0][1] in (JCconstants.INS_SETUP, JCconstants.INS_BIP32_IMPORT_SEED, JCconstants.INS_BIP32_RESET_SEED,
                                                     JCconstants.INS_CREATE_PIN, JCconstants.INS_VERIFY_PIN, 
                                                     JCconstants.INS_CHANGE_PIN, JCconstants.INS_UNBLOCK_PIN)):
                 print_error(f"> {toHexString(ccevent.args[0][0:5])}{(len(ccevent.args[0])-5)*' *'}")
@@ -62,8 +62,9 @@ class CardConnector:
     # v0.5: Support for Segwit transaction
     # v0.6: bip32 optimization: speed up computation during derivation of non-hardened child 
     # v0.7: add 2-Factor-Authentication (2FA) support
+    # v0.8: support seed reset and pin change
     SATOCHIP_PROTOCOL_MAJOR_VERSION=0
-    SATOCHIP_PROTOCOL_MINOR_VERSION=7
+    SATOCHIP_PROTOCOL_MINOR_VERSION=8
     
     # define the apdus used in this script
     BYTE_AID= [0x53,0x61,0x74,0x6f,0x43,0x68,0x69,0x70] #SatoChip
@@ -157,6 +158,8 @@ class CardConnector:
                 d["PUK0_remaining_tries"]= response[5]
                 d["PIN1_remaining_tries"]= response[6]
                 d["PUK1_remaining_tries"]= response[7]
+            if len(response) >=9:
+                d["needs2FA"]= False if response[8]==0X00 else True            
         return (response, sw1, sw2, d)
     
     def card_setup(self, 
@@ -217,6 +220,17 @@ class CardConnector:
         if (sw1==0x90) and (sw2==0x00):
             authentikey= self.card_bip32_set_authentikey_pubkey(response)    
         return authentikey           
+    
+    def card_reset_seed(self, pin, hmac=[]):
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x77
+        p1= len(pin)  
+        p2= 0x00
+        le= len(pin)+len(hmac)
+        apdu=[cla, ins, p1, p2, le]+pin+hmac
+        
+        response, sw1, sw2 = self.card_transmit(apdu)
+        return (response, sw1, sw2)   
     
     def card_bip32_get_authentikey(self):
         cla= JCconstants.CardEdge_CLA
@@ -512,6 +526,17 @@ class CardConnector:
             msg_out= bytes(msg_out).decode('latin-1')#''.join(chr(i) for i in msg_out) #bytes(msg_out).decode('latin-1')
             return (msg_out)
     
+    def card_get_counter_2FA(self):
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x78
+        p1= 0x00
+        p2= 0x00
+        lc= 0
+        apdu=[cla, ins, p1, p2, lc]
+        # send apdu
+        response, sw1, sw2 = self.card_transmit(apdu)
+        return (response, sw1, sw2)      
+
     def card_create_PIN(self, pin_nbr, pin_tries, pin, ublk):
         cla= JCconstants.CardEdge_CLA
         ins= JCconstants.INS_CREATE_PIN
@@ -581,6 +606,7 @@ class CardConnector:
         apdu=[cla, ins, p1, p2, lc] + [len(old_pin)] + old_pin + [len(new_pin)] + new_pin
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
+        self.set_pin(0, None)
         return (response, sw1, sw2)      
     
     def card_unblock_PIN(self, pin_nbr, ublk):
@@ -603,6 +629,7 @@ class CardConnector:
         apdu=[cla, ins, p1, p2, lc]
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
+        self.set_pin(0, None)
         return (response, sw1, sw2)      
     
 class AuthenticationError(Exception):    

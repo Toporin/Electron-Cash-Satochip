@@ -23,9 +23,10 @@ class LogCardConnectionObserver( CardConnectionObserver ):
         elif 'disconnect'==ccevent.type:
             print_error( 'disconnecting from ' + cardconnection.getReader())
         elif 'command'==ccevent.type:
-            if (ccevent.args[0][1] in (JCconstants.INS_SETUP, JCconstants.INS_BIP32_IMPORT_SEED, JCconstants.INS_BIP32_RESET_SEED,
-                                                    JCconstants.INS_CREATE_PIN, JCconstants.INS_VERIFY_PIN, 
-                                                    JCconstants.INS_CHANGE_PIN, JCconstants.INS_UNBLOCK_PIN)):
+            if (ccevent.args[0][1] in (JCconstants.INS_SETUP, JCconstants.INS_SET_2FA_KEY, 
+                                        JCconstants.INS_BIP32_IMPORT_SEED, JCconstants.INS_BIP32_RESET_SEED,
+                                        JCconstants.INS_CREATE_PIN, JCconstants.INS_VERIFY_PIN, 
+                                        JCconstants.INS_CHANGE_PIN, JCconstants.INS_UNBLOCK_PIN)):
                 print_error(f"> {toHexString(ccevent.args[0][0:5])}{(len(ccevent.args[0])-5)*' *'}")
             else:        
                 print_error(f"> {toHexString(ccevent.args[0])}")    
@@ -74,6 +75,7 @@ class CardConnector:
         self.client=client
         self.parser=client.parser
         self.cardtype = AnyCardType()
+        self.needs_2FA = None
         try: 
             # request card insertion
             self.cardrequest = CardRequest(timeout=10, cardType=self.cardtype)
@@ -158,8 +160,10 @@ class CardConnector:
                 d["PUK0_remaining_tries"]= response[5]
                 d["PIN1_remaining_tries"]= response[6]
                 d["PUK1_remaining_tries"]= response[7]
+                self.needs_2FA= d["needs2FA"]= False #default value
             if len(response) >=9:
-                d["needs2FA"]= False if response[8]==0X00 else True            
+                self.needs_2FA= d["needs2FA"]= False if response[8]==0X00 else True
+                
         return (response, sw1, sw2, d)
     
     def card_setup(self, 
@@ -314,13 +318,13 @@ class CardConnector:
                 (key, chaincode)= self.parser.parse_bip32_get_extendedkey(response)
                 return (key, chaincode)
     
-    def card_sign_message(self, keynbr, message):
+    def card_sign_message(self, keynbr, message, hmac=[]):
         if (type(message)==str):
             message = message.encode('utf8')
         
         # return signature as byte array
         # data is cut into chunks, each processed in a different APDU call
-        chunk= 160 # max APDU data=256 => chunk<=255-(4+2)
+        chunk= 160 # max APDU data=255 => chunk<=255-(4+2)
         buffer_offset=0
         buffer_left=len(message)
 
@@ -358,17 +362,17 @@ class CardConnector:
         #ins= INS_COMPUTE_CRYPT
         #p1= key_nbr
         p2= JCconstants.OP_FINALIZE
-        le= 2+chunk
+        le= 2+chunk+ len(hmac)
         apdu=[cla, ins, p1, p2, le]
         apdu+=[((chunk>>8) & 0xFF), (chunk & 0xFF)]
-        apdu+= message[buffer_offset:(buffer_offset+chunk)]
+        apdu+= message[buffer_offset:(buffer_offset+chunk)]+hmac
         buffer_offset+=chunk
         buffer_left-=chunk
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
         return (response, sw1, sw2)
         
-    def card_sign_short_message(self, keynbr, message):
+    def card_sign_short_message(self, keynbr, message, hmac=[]):
         if (type(message)==str):
             message = message.encode('utf8')
         
@@ -377,10 +381,10 @@ class CardConnector:
         ins= JCconstants.INS_SIGN_SHORT_MESSAGE
         p1= keynbr # oxff=>BIP32 otherwise STD
         p2= 0x00
-        le= message.length+2
-        apdu=[cla, ins, p1, p2, le]
-        apdu+=[(message.length>>8 & 0xFF), (message.length & 0xFF)]
-        apdu+=message
+        le= message.length+2+len(hmac)
+        apdu= [cla, ins, p1, p2, le]
+        apdu+= [(message.length>>8 & 0xFF), (message.length & 0xFF)]
+        apdu+= message+ hmac
         # send apdu
         response, sw1, sw2 = self.card_transmit(apdu)
         return (response, sw1, sw2)      
@@ -441,6 +445,36 @@ class CardConnector:
         response, sw1, sw2 = self.card_transmit(apdu)
         return (response, sw1, sw2)      
             
+    def card_set_2FA_key(self, hmacsha160_key, amount_limit):
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x79
+        p1= 0x00
+        p2= 0x00
+        le= 28 # data=[ hmacsha160_key(20) | amount_limit(8) ]
+        apdu=[cla, ins, p1, p2, le]
+        
+        apdu+= hmacsha160_key
+        for i in reversed(range(8)):
+            apdu+=[(amount_limit>>(8*i))&0xff]
+
+        # send apdu (contains sensitive data!)
+        (response, sw1, sw2) = self.card_transmit(apdu)    
+        return (response, sw1, sw2)            
+    
+    def card_reset_2FA_key(self, chalresponse):
+        cla= JCconstants.CardEdge_CLA
+        ins= 0x78
+        p1= 0x00
+        p2= 0x00
+        le= 20 # data=[ hmacsha160_key(20) ]
+        apdu=[cla, ins, p1, p2, le]
+        apdu+= chalresponse
+
+        # send apdu (contains sensitive data!)
+        (response, sw1, sw2) = self.card_transmit(apdu)    
+        return (response, sw1, sw2)
+    
+    
     def card_crypt_transaction_2FA(self, msg, is_encrypt=True):
         if (type(msg)==str):
             msg = msg.encode('utf8')
@@ -525,17 +559,6 @@ class CardConnector:
             msg_out=msg_out[0:-pad]
             msg_out= bytes(msg_out).decode('latin-1')#''.join(chr(i) for i in msg_out) #bytes(msg_out).decode('latin-1')
             return (msg_out)
-    
-    def card_get_counter_2FA(self):
-        cla= JCconstants.CardEdge_CLA
-        ins= 0x78
-        p1= 0x00
-        p2= 0x00
-        lc= 0
-        apdu=[cla, ins, p1, p2, lc]
-        # send apdu
-        response, sw1, sw2 = self.card_transmit(apdu)
-        return (response, sw1, sw2)      
 
     def card_create_PIN(self, pin_nbr, pin_tries, pin, ublk):
         cla= JCconstants.CardEdge_CLA

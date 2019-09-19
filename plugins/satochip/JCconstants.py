@@ -110,6 +110,9 @@ class JCconstants:
     INS_BIP32_SET_EXTENDED_KEY=  0x70;
     INS_PARSE_TRANSACTION =  0x71;
     
+    # 2FA
+    INS_SET_2FA_KEY = 0x79;    
+    
     '''****************************************
        *             Error codes              *
        ****************************************'''	   

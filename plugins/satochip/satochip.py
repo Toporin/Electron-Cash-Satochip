@@ -210,20 +210,57 @@ class Satochip_KeyStore(Hardware_KeyStore):
         raise RuntimeError(_('Encryption and decryption are currently not supported for {}').format(self.device))
         
     def sign_message(self, sequence, message, password):
-        message = message.encode('utf8')
-        message_hash = hashlib.sha256(message).hexdigest().upper()
+        
+        message_byte = message.encode('utf8')
+        message_hash = hashlib.sha256(message_byte).hexdigest().upper()
         client = self.get_client()
         address_path = self.get_derivation()[2:] + "/%d/%d"%sequence
         print_error('[satochip] debug: sign_message: path: '+address_path)
         self.handler.show_message("Signing message ...\r\nMessage hash: "+message_hash)
+        
+        # check if 2FA is required
+        hmac=[]
+        if (client.cc.needs_2FA==None):
+            (response, sw1, sw2, d)=client.cc.card_get_status()
+        if client.cc.needs_2FA: 
+            # challenge based on sha256(btcheader+msg)
+            # format & encrypt msg
+            import json
+            msg= {'action':"sign_msg", 'msg':message}
+            msg=  json.dumps(msg)
+            (id_2FA, msg_out)= client.cc.card_crypt_transaction_2FA(msg, True)
+            d={}
+            d['msg_encrypt']= msg_out
+            d['id_2FA']= id_2FA
+            # print_error("encrypted message: "+msg_out)
+            print_error("id_2FA: "+id_2FA)
+            
+            #do challenge-response with 2FA device...
+            client.handler.show_message('2FA request sent! Approve or reject request on your second device.')
+            run_hook('do_challenge_response', d)
+            # decrypt and parse reply to extract challenge response
+            try: 
+                reply_encrypt= d['reply_encrypt']
+            except Exception as e:
+                self.give_error("No response received from 2FA.\nPlease ensure that the Satochip-2FA plugin is enabled in Tools>Optional Features", True)
+            reply_decrypt= client.cc.card_crypt_transaction_2FA(reply_encrypt, False)
+            print_error("challenge:response= "+ reply_decrypt)
+            reply_decrypt= reply_decrypt.split(":")
+            chalresponse=reply_decrypt[1]
+            hmac= bytes.fromhex(chalresponse)
+                
         try:
             #path= self.get_derivation() + ("/%d/%d" % sequence)
             keynbr= 0xFF #for extended key
             (depth, bytepath)= bip32path2bytes(address_path)
             (key, chaincode)=client.cc.card_bip32_get_extendedkey(bytepath)
-            (response2, sw1, sw2) = client.cc.card_sign_message(keynbr, message)
-            compsig=client.parser.parse_message_signature(response2, message, key)
-            
+            (response2, sw1, sw2) = client.cc.card_sign_message(keynbr, message_byte, hmac)
+            if (sw1!=0x90 or sw2!=0x00):
+                print_error("[satochip] SatochipPlugin: error during sign_message(): sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
+                compsig=b''
+                client.handler.show_error(_("Wrong signature!\nThe 2FA device may have rejected the action.")) 
+            else:
+                compsig=client.parser.parse_message_signature(response2, message_byte, key)
         except Exception as e:
             self.give_error(e, True)
         finally:
@@ -290,7 +327,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
                         import json
                         coin_type= 145 #see https://github.com/satoshilabs/slips/blob/master/slip-0044.md
                         test_net= networks.net.TESTNET
-                        msg= {'tx':pre_tx_hex, 'ct':coin_type, 'sw':True, 'tn':test_net, 'txo':txOutputs, 'ty':txin['type']} 
+                        msg= {'action':"sign_tx", 'tx':pre_tx_hex, 'ct':coin_type, 'sw':True, 'tn':test_net, 'txo':txOutputs, 'ty':txin['type']} 
                         msg=  json.dumps(msg)
                         (id_2FA, msg_out)= client.cc.card_crypt_transaction_2FA(msg, True)
                         d={}
@@ -313,13 +350,15 @@ class Satochip_KeyStore(Hardware_KeyStore):
                         reply_decrypt= client.cc.card_crypt_transaction_2FA(reply_encrypt, False)
                         print_error("challenge:response= "+ reply_decrypt)
                         reply_decrypt= reply_decrypt.split(":")
-                        rep_pre_hash_hex= reply_decrypt[0]
+                        rep_pre_hash_hex= reply_decrypt[0][0:64]
                         if rep_pre_hash_hex!= pre_hash_hex:
                             #todo: abort tx or retry?
+                            print_error("Abort transaction: tx mismatch: "+rep_pre_hash_hex+" != "+pre_hash_hex)
                             break
                         chalresponse=reply_decrypt[1]
                         if chalresponse=="00"*20:
                             #todo: abort tx?
+                            print_error("Abort transaction: rejected by 2FA!")
                             break
                         chalresponse= list(bytes.fromhex(chalresponse))
                     else:
@@ -465,39 +504,17 @@ class SatochipPlugin(HW_PluginBase):
                 create_key_ACL= 0x01
                 create_pin_ACL= 0x01
                 
-                # Optionnaly setup 2-Factor-Authentication (2FA)
-                #msg= "Do you want to use 2-Factor-Authentication?"
-                use_2FA=client.handler.yes_no_question(MSG_USE_2FA)
-                print("[satochip] SatochipPlugin: setup_device(): perform cardSetup:")#debugSatochip
-                if (use_2FA):
-                    option_flags= 0x8000 # activate 2fa with hmac challenge-response
-                    secret_2FA= urandom(20)
-                    #secret_2FA=b'\0'*20 #for debug purpose
-                    secret_2FA_hex=secret_2FA.hex()
-                    amount_limit= 0 # always use 
-                    (response, sw1, sw2)=client.cc.card_setup(pin_tries_0, ublk_tries_0, pin_0, ublk_0,
-                        pin_tries_1, ublk_tries_1, pin_1, ublk_1, 
-                        secmemsize, memsize, 
-                        create_object_ACL, create_key_ACL, create_pin_ACL,
-                        option_flags, list(secret_2FA), amount_limit)
-                    # the secret must be shared with the second factor app (eg on a smartphone)
-                    try:
-                        d = QRDialog(secret_2FA_hex, None, "Secret_2FA", True)
-                        d.exec_()
-                    except Exception as e:
-                        print_error("[satochip] SatochipPlugin: setup_device(): setup 2FA: "+str(e))
-                    # further communications will require an id and an encryption key (for privacy). 
-                    # Both are derived from the secret_2FA using a one-way function inside the Satochip
-                else:
-                    (response, sw1, sw2)=client.cc.card_setup(pin_tries_0, ublk_tries_0, pin_0, ublk_0,
+                # setup
+                print_error("[satochip] SatochipPlugin: setup_device(): perform cardSetup:")#debugSatochip
+                (response, sw1, sw2)=client.cc.card_setup(pin_tries_0, ublk_tries_0, pin_0, ublk_0,
                         pin_tries_1, ublk_tries_1, pin_1, ublk_1, 
                         secmemsize, memsize, 
                         create_object_ACL, create_key_ACL, create_pin_ACL)
                 if sw1!=0x90 or sw2!=0x00:                 
-                    print("[satochip] SatochipPlugin: setup_device(): unable to set up applet!  sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
-                    raise RuntimeError('Unable to setup the device with error code:'+hex(sw1)+' '+hex(sw2))
+                    print_error("[satochip] SatochipPlugin: setup_device(): unable to set up applet!  sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
+                    raise RuntimeError('Unable to setup the device with error code:'+hex(sw1)+' '+hex(sw2))        
             else:
-                print("[satochip] SatochipPlugin: unknown get-status() error! sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
+                print_error("[satochip] SatochipPlugin: unknown get-status() error! sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
                 raise RuntimeError('Unknown get-status() error code:'+hex(sw1)+' '+hex(sw2))
             
         # verify pin:
@@ -508,16 +525,40 @@ class SatochipPlugin(HW_PluginBase):
             try:
                 authentikey=client.cc.card_bip32_get_authentikey()
             except UninitializedSeedError:
-                # test seed dialog...
+
+                # Option: setup 2-Factor-Authentication (2FA)
+                if not client.cc.needs_2FA:
+                    use_2FA=client.handler.yes_no_question(MSG_USE_2FA)
+                    if (use_2FA):
+                        option_flags= 0x8000 # activate 2fa with hmac challenge-response
+                        secret_2FA= urandom(20)
+                        #secret_2FA=b'\0'*20 #for debug purpose
+                        secret_2FA_hex=secret_2FA.hex()
+                        amount_limit= 0 # i.e. always use 
+                        (response, sw1, sw2)=client.cc.card_set_2FA_key(secret_2FA, amount_limit)
+                        # the secret must be shared with the second factor app (eg on a smartphone)
+                        try:
+                            d = QRDialog(secret_2FA_hex, None, "Secret_2FA", True)
+                            d.exec_()
+                        except Exception as e:
+                            print_error("[satochip] SatochipPlugin: setup_device(): setup 2FA: "+str(e))
+                        # further communications will require an id and an encryption key (for privacy). 
+                        # Both are derived from the secret_2FA using a one-way function inside the Satochip
+                    if sw1!=0x90 or sw2!=0x00:                 
+                        print("[satochip] SatochipPlugin: setup_device(): unable to set 2FA!  sw12="+hex(sw1)+" "+hex(sw2))#debugSatochip
+                        raise RuntimeError('Unable to setup 2FA with error code:'+hex(sw1)+' '+hex(sw2))
+                    
+                # seed dialog...
                 print("[satochip] SatochipPlugin: setup_device(): import seed:") #debugSatochip
                 self.choose_seed(wizard)
                 seed= list(self.bip32_seed)
                 #seed= bytes([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]) # Bip32 test vectors
                 authentikey= client.cc.card_bip32_import_seed(seed) 
+                
             hex_authentikey= authentikey.get_public_key_hex(compressed=True)
             print_error("[satochip] SatochipPlugin: setup_device(): authentikey="+hex_authentikey)#debugSatochip
             wizard.storage.put('authentikey', hex_authentikey)
-            print_error("[satochip] SatochipPlugin: setup_device(): authentikey from storage="+wizard.storage.get('authentikey'))#debugSatochip       
+            print_error("[satochip] SatochipPlugin: setup_device(): authentikey from storage="+wizard.storage.get('authentikey'))#debugSatochip
             break
         
     def get_xpub(self, device_id, derivation, xtype, wizard):

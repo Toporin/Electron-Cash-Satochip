@@ -318,7 +318,7 @@ class CardConnector:
                 (key, chaincode)= self.parser.parse_bip32_get_extendedkey(response)
                 return (key, chaincode)
     
-    def card_sign_message(self, keynbr, message, hmac=[]):
+    def card_sign_message(self, keynbr, message, hmac=b''):
         if (type(message)==str):
             message = message.encode('utf8')
         
@@ -372,7 +372,7 @@ class CardConnector:
         response, sw1, sw2 = self.card_transmit(apdu)
         return (response, sw1, sw2)
         
-    def card_sign_short_message(self, keynbr, message, hmac=[]):
+    def card_sign_short_message(self, keynbr, message, hmac=b''):
         if (type(message)==str):
             message = message.encode('utf8')
         

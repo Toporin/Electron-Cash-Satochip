@@ -219,7 +219,7 @@ class Satochip_KeyStore(Hardware_KeyStore):
         self.handler.show_message("Signing message ...\r\nMessage hash: "+message_hash)
         
         # check if 2FA is required
-        hmac=[]
+        hmac=b''
         if (client.cc.needs_2FA==None):
             (response, sw1, sw2, d)=client.cc.card_get_status()
         if client.cc.needs_2FA: 

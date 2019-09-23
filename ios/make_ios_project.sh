@@ -65,7 +65,7 @@ fi
 cp -fpR ../lib ${compact_name}/electroncash
 echo "Removing lib/tests..."
 rm -fr ${compact_name}/electroncash/tests
-find ${compact_name} -name \*.pyc -exec rm -f {} \; 
+find ${compact_name} -name \*.pyc -exec rm -f {} \;
 
 echo ""
 echo "Building Briefcase-Based iOS Project..."
@@ -85,7 +85,7 @@ if [ -f "${infoplist}" ]; then
 	echo ""
 	echo "Adding custom keys to ${infoplist} ..."
 	echo ""
-	plutil -insert "NSAppTransportSecurity" -xml '<dict><key>NSAllowsArbitraryLoads</key><true/></dict>' -- ${infoplist} 
+	plutil -insert "NSAppTransportSecurity" -xml '<dict><key>NSAllowsArbitraryLoads</key><true/></dict>' -- ${infoplist}
 	if [ "$?" != "0" ]; then
 		echo "Encountered error adding custom key NSAppTransportSecurity to plist!"
 		exit 1
@@ -105,7 +105,7 @@ if [ -f "${infoplist}" ]; then
 		fi
 	fi
 	# UILaunchStoryboardName -- this is required to get proper iOS screen sizes due to iOS being quirky AF
-	if [ -e "Resources/LaunchScreen.storyboard" ]; then 
+	if [ -e "Resources/LaunchScreen.storyboard" ]; then
 		plutil -insert "UILaunchStoryboardName" -string "LaunchScreen" -- ${infoplist}
 		if [ "$?" != "0" ]; then
 			echo "Encountered an error adding LaunchScreen to Info.plist!"
@@ -116,7 +116,7 @@ if [ -f "${infoplist}" ]; then
 	plutil -insert "NSCameraUsageDescription" -string "The camera is needed to scan QR codes" -- ${infoplist}
 
 	# Stuff related to being able to open .txn and .txt files (open transaction from context menu in other apps)
-	plutil -insert "CFBundleDocumentTypes" -xml '<array><dict><key>CFBundleTypeIconFiles</key><array/><key>CFBundleTypeName</key><string>Transaction</string><key>LSItemContentTypes</key><array><string>public.plain-text</string></array></dict></array>' -- ${infoplist}
+	plutil -insert "CFBundleDocumentTypes" -xml '<array><dict><key>CFBundleTypeIconFiles</key><array/><key>CFBundleTypeName</key><string>Transaction</string><key>LSItemContentTypes</key><array><string>public.plain-text</string></array><key>LSHandlerRank</key><string>Owner</string></dict></array>' -- ${infoplist}
 	plutil -insert "UTExportedTypeDeclarations" -xml '<array><dict><key>UTTypeConformsTo</key><array><string>public.plain-text</string></array><key>UTTypeDescription</key><string>Transaction</string><key>UTTypeIdentifier</key><string>com.c3-soft.ElectronCash.txn</string><key>UTTypeSize320IconFile</key><string>signed@2x</string><key>UTTypeSize64IconFile</key><string>signed</string><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>txn</string><string>txt</string></array></dict></dict></array>' -- ${infoplist}
 	plutil -insert "UTImportedTypeDeclarations" -xml '<array><dict><key>UTTypeConformsTo</key><array><string>public.plain-text</string></array><key>UTTypeDescription</key><string>Transaction</string><key>UTTypeIdentifier</key><string>com.c3-soft.ElectronCash.txn</string><key>UTTypeSize320IconFile</key><string>signed@2x</string><key>UTTypeSize64IconFile</key><string>signed</string><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>txn</string><string>txt</string></array></dict></dict></array>' -- ${infoplist}
 	plutil -insert 'CFBundleURLTypes' -xml '<array><dict><key>CFBundleTypeRole</key><string>Viewer</string><key>CFBundleURLName</key><string>bitcoincash</string><key>CFBundleURLSchemes</key><array><string>bitcoincash</string></array></dict></array>' -- ${infoplist}
@@ -176,11 +176,11 @@ cd ..
 cd ..
 [ "$gitexit" != "0" -o "$gitexit2" != 0 ] && echo '*** Error grabbing the latest rubicon off of github' && exit 1
 rm -fr iOS/app_packages/rubicon/objc
-cp -fpvr scratch/rubicon-objc/rubicon/objc iOS/app_packages/rubicon/ 
+cp -fpvr scratch/rubicon-objc/rubicon/objc iOS/app_packages/rubicon/
 [ "$?" != "0" ] && echo '*** Error copying rubicon files' && exit 1
 rm -fr scratch
 
-xcode_file="${xcode_target}.xcodeproj/project.pbxproj" 
+xcode_file="${xcode_target}.xcodeproj/project.pbxproj"
 echo ""
 echo "Mogrifying Xcode .pbxproj file to use iOS 10.0 deployment target..."
 echo ""
@@ -234,7 +234,7 @@ echo ""
 echo "Modifying main.m to include PYTHONIOENCODING=UTF-8..."
 echo ""
 main_m="iOS/${compact_name}/main.m"
-if cat $main_m | sed -e '1 s/putenv/putenv("PYTHONIOENCODING=UTF-8"); putenv/; t' -e '1,// s//putenv("PYTHONIOENCODING=UTF-8"); putenv/' > ${main_m}.new; then
+if cat $main_m | sed -e '1 s/putenv/putenv("PYTHONIOENCODING=UTF-8"); putenv/; t' -e '1,// s//putenv("PYTHONIOENCODING=UTF-8"); putenv/' | sed -e 's/PYTHONOPTIMIZE=1/PYTHONOPTIMIZE=/;' > ${main_m}.new; then
 	mv -fv ${main_m}.new $main_m
 else
 	echo "** WARNING: Failed to modify main.m to include PYTHONIOENCODING=UTF-8"
@@ -251,6 +251,9 @@ fi
 # Clean up no-longer-needed electroncash/ dir that is outside of Xcode project
 rm -fr ${compact_name}/electroncash/*
 
+# Can add this back when it works uniformly without issues
+# /usr/bin/env ruby update_project.rb
+
 echo ''
 echo '**************************************************************************'
 echo '*                                                                        *'
@@ -259,9 +262,10 @@ echo '*                                                                        *
 echo '**************************************************************************'
 echo ''
 echo '  IMPORTANT!'
-echo '        Now you need to manually add the library libxml2.tbd to the '
-echo '        project under "General -> Linked Frameworks and Libraries" else '
-echo '        you will get build errors! '
+echo '        Now you need to either manually add the library libxml2.tbd to the '
+echo '        project under "General -> Linked Frameworks and Libraries" *or* '
+echo '        run the ./update_project.rb script which will do it for you.'
+echo '        Either of the above are needed to prevent build errors! '
 echo ''
 echo '  Also note:'
 echo '        Modifications to files in iOS/ will be clobbered the next    '
@@ -277,5 +281,5 @@ echo '            - "Strip Linked Product" = NO '
 echo '            - "Strip Style" = Debugging Symbols '
 echo '            - "Enable Bitcode" = NO '
 echo '            - "Valid Architectures" = arm64 '
+echo '            - "Symbols Hidden by Default" = NO '
 echo ''
-

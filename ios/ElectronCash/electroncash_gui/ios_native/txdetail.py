@@ -21,6 +21,8 @@ from . import contacts
 _TxInputsOutputsCellHeight = 85.0
 _TxInputsOutputsHeaderHeight = 22.0
 
+SCHNORR_SIGIL = "ⓢ"
+
 # ViewController used for the TxDetail view's "Inputs" and "Outputs" tables.. not exposed.. managed internally
 class TxInputsOutputsTVC(TxInputsOutputsTVCBase):
 
@@ -284,7 +286,11 @@ class TxInputsOutputsTVC(TxInputsOutputsTVCBase):
                 data = getData(x, False, True)
             else:
                 data = getData(x, True, False)
-                data = Address.from_string(data)
+                try:
+                    data = Address.from_string(data)
+                except:
+                    parent.show_error(_('Invalid address') + ': ' + str(data))
+                    return
             parent.view_on_block_explorer(data, "tx" if isInput else "addr")
 
         actions = [
@@ -372,7 +378,7 @@ def _setup_transaction_detail_view(vc : ObjCInstance) -> None:
     if tx is None:
         tx = wallet.transactions.get(tx_hash, None)
         if tx is not None and tx.raw:
-            tx = Transaction(tx.raw)
+            tx = Transaction(tx.raw, sign_schnorr=parent.prefs_use_schnorr)
             tx.deserialize()
     if tx is None:
         utils.NSLog("*** ERROR: Cannot find tx for hash: %s",tx_hash)
@@ -416,6 +422,8 @@ def _setup_transaction_detail_view(vc : ObjCInstance) -> None:
     # Locktime:
     lockTit = vc.lockTit
     lockLbl = vc.lockLbl
+    # ⓢ Schnorr Signed label
+    schnorrLbl = vc.schnorrLbl
     # Inputs
     inputsTV = vc.inputsTV
     # Outputs
@@ -568,9 +576,10 @@ def _setup_transaction_detail_view(vc : ObjCInstance) -> None:
         lockTit.setHidden_(True)
         lockLbl.setHidden_(True)
 
+    n_inp, n_outp = len(tx.inputs()), len(tx.outputs())
     # auto-adjust height of table views
-    vc.inputsTVHeightCS.constant = min(_TxInputsOutputsHeaderHeight + _TxInputsOutputsCellHeight*len(tx.inputs()), vc.maxTVHeight)
-    vc.outputsTVHeightCS.constant = min(_TxInputsOutputsHeaderHeight + _TxInputsOutputsCellHeight*len(tx.outputs()), vc.maxTVHeight)
+    vc.inputsTVHeightCS.constant = min(_TxInputsOutputsHeaderHeight + _TxInputsOutputsCellHeight*n_inp, vc.maxTVHeight)
+    vc.outputsTVHeightCS.constant = min(_TxInputsOutputsHeaderHeight + _TxInputsOutputsCellHeight*n_outp, vc.maxTVHeight)
 
     # refreshes the tableview with data
     if wasNew:
@@ -579,6 +588,12 @@ def _setup_transaction_detail_view(vc : ObjCInstance) -> None:
     else:
         inputsTV.reloadData()
         outputsTV.reloadData()
+
+    if any(tx.is_schnorr_signed(i) for i in range(n_inp)):
+        schnorrLbl.text = SCHNORR_SIGIL + " " + _('Schnorr Signed')
+        schnorrLbl.setHidden_(False)
+    else:
+        schnorrLbl.setHidden_(True)
 
 
 class TxDetail(TxDetailBase):

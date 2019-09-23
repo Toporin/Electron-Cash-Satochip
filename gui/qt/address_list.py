@@ -37,6 +37,7 @@ import electroncash.web as web
 from electroncash.util import profiler
 from electroncash import networks
 from enum import IntEnum
+from . import cashacctqt
 
 class AddressList(MyTreeWidget):
     filter_columns = [0, 1, 2]  # Address, Label, Balance
@@ -49,10 +50,15 @@ class AddressList(MyTreeWidget):
         can_edit_label = Qt.UserRole + 1
         cash_accounts  = Qt.UserRole + 2
 
-    def __init__(self, parent=None):
+    def __init__(self, parent, *, picker=False):
         super().__init__(parent, self.create_menu, [], 2, deferred_updates=True)
         self.refresh_headers()
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.picker = picker
+        if self.picker:
+            self.setSelectionMode(QAbstractItemView.SingleSelection)
+            self.editable_columns = []
+        else:
+            self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSortingEnabled(True)
         self.wallet = self.parent.wallet
         self.monospace_font = QFont(MONOSPACE_FONT)
@@ -63,6 +69,9 @@ class AddressList(MyTreeWidget):
         self._ca_cb_registered = False
         self._ca_minimal_chash_updated_signal.connect(self._ca_update_chash)
 
+        self.parent.gui_object.cashaddr_toggled_signal.connect(self.update)
+        self.parent.ca_address_default_changed_signal.connect(self._ca_on_address_default_change)
+
         if not __class__._cashacct_icon:
             # lazy init the icon
             __class__._cashacct_icon = QIcon(":icons/cashacct-logo.png")  # TODO: make this an SVG
@@ -72,6 +81,11 @@ class AddressList(MyTreeWidget):
         if self.wallet.network:
             self.wallet.network.unregister_callback(self._ca_updated_minimal_chash_callback)
             self._ca_cb_registered = False
+        # paranoia -- we have seen Qt not clean up the signal before the object is destroyed on Python 3.7.3 PyQt 5.12.3, see #1531
+        try: self.parent.gui_object.cashaddr_toggled_signal.disconnect(self.update)
+        except TypeError: pass
+        try: self.parent.ca_address_default_changed_signal.disconnect(self._ca_on_address_default_change)
+        except TypeError: pass
 
     def filter(self, p):
         ''' Reimplementation from superclass filter.  Chops off the
@@ -243,6 +257,9 @@ class AddressList(MyTreeWidget):
 
 
     def create_menu(self, position):
+        if self.picker:
+            # picker mode has no menu
+            return
         from electroncash.wallet import Multisig_Wallet
         is_multisig = isinstance(self.wallet, Multisig_Wallet)
         can_delete = self.wallet.can_delete_address()
@@ -255,9 +272,17 @@ class AddressList(MyTreeWidget):
 
         menu = QMenu()
 
+        where_to_insert_dupe_copy_cash_account = None
+
+        def doCopy(txt):
+            txt = txt.strip()
+            self.parent.copy_to_clipboard(txt)
+
+        col = self.currentColumn()
+        column_title = self.headerItem().text(col)
+
         if not multi_select:
             item = self.itemAt(position)
-            col = self.currentColumn()
             if not item:
                 return
             if not addrs:
@@ -265,7 +290,6 @@ class AddressList(MyTreeWidget):
                 return
             addr = addrs[0]
 
-            column_title = self.headerItem().text(col)
             alt_copy_text, alt_column_title = None, None
             if col == 0:
                 copy_text = addr.to_full_ui_string()
@@ -275,18 +299,24 @@ class AddressList(MyTreeWidget):
                     alt_copy_text, alt_column_title = addr.to_full_string(Address.FMT_LEGACY), _('Legacy Address')
             else:
                 copy_text = item.text(col)
-            def doCopy(txt):
-                txt = txt.strip()
-                self.parent.copy_to_clipboard(txt)
             menu.addAction(_("Copy {}").format(column_title), lambda: doCopy(copy_text))
             if alt_copy_text and alt_column_title:
                 # Add 'Copy Legacy Address' and 'Copy Cash Address' alternates if right-click is on column 0
                 menu.addAction(_("Copy {}").format(alt_column_title), lambda: doCopy(alt_copy_text))
-            menu.addAction(_('Details') + "...", lambda: self.parent.show_address(addr))
+            a = menu.addAction(_('Details') + "...", lambda: self.parent.show_address(addr))
+            if col == 0:
+                where_to_insert_dupe_copy_cash_account = a
             if col in self.editable_columns:
                 menu.addAction(_("Edit {}").format(column_title), lambda: self.editItem(self.itemAt(position), # NB: C++ item may go away if this widget is refreshed while menu is up -- so need to re-grab and not store in lamba. See #953
                                                                                         col))
-            menu.addAction(_("Request payment"), lambda: self.parent.receive_at(addr))
+            a = menu.addAction(_("Request payment"), lambda: self.parent.receive_at(addr))
+            if self.wallet.get_num_tx(addr) or self.wallet.has_payment_request(addr):
+                # This address cannot be used for a payment request because
+                # the receive tab will refuse to display it and will instead
+                # create a request with a new address, if we were to call
+                # self.parent.receive_at(addr). This is because the recieve tab
+                # now strongly enforces no-address-reuse. See #1552.
+                a.setDisabled(True)
             if self.wallet.can_export():
                 menu.addAction(_("Private key"), lambda: self.parent.show_private_key(addr))
             if not is_multisig and not self.wallet.is_watching_only():
@@ -297,6 +327,24 @@ class AddressList(MyTreeWidget):
             addr_URL = web.BE_URL(self.config, 'addr', addr)
             if addr_URL:
                 menu.addAction(_("View on block explorer"), lambda: webopen(addr_URL))
+        else:
+            # multi-select
+            if col > -1:
+                texts, alt_copy, alt_copy_text = None, None, None
+                if col == 0: # address column
+                    texts = [a.to_ui_string() for a in addrs]
+                    # Add additional copy option: "Address, Balance (n)"
+                    alt_copy = _("Copy {}").format(_("Address") + ", " + _("Balance")) + f" ({len(addrs)})"
+                    alt_copy_text = "\n".join([a.to_ui_string() + ", " + self.parent.format_amount(sum(self.wallet.get_addr_balance(a)))
+                                              for a in addrs])
+                else:
+                    texts = [i.text(col).strip() for i in selected]
+                    texts = [t for t in texts if t]  # omit empty items
+                if texts:
+                    copy_text = '\n'.join(texts)
+                    menu.addAction(_("Copy {}").format(column_title) + f" ({len(texts)})", lambda: doCopy(copy_text))
+                if alt_copy and alt_copy_text:
+                    menu.addAction(alt_copy, lambda: doCopy(alt_copy_text))
 
         freeze = self.parent.set_frozen_state
         if any(self.wallet.is_frozen(addr) for addr in addrs):
@@ -319,13 +367,16 @@ class AddressList(MyTreeWidget):
                 ca_default = self._ca_get_default(ca_list)
                 for ca_info in ca_list:
                     ca_text = self.wallet.cashacct.fmt_info(ca_info, ca_info.minimal_chash)
+                    ca_text_em = self.wallet.cashacct.fmt_info(ca_info, ca_info.minimal_chash, emoji=True)
                     m = menu.addMenu(ca_info.emoji + " " + ca_text)
-                    #a = menu.addAction(ca_info.emoji + " " + self.wallet.cashacct.fmt_info(ca_info, ca_info.minimal_chash), lambda: None)
-                    a = m.addAction(_("Copy Cash Account"), lambda x=None, text=ca_text: doCopy(text))
-                    a = m.addAction(_("Details") + "...", lambda: self.parent.show_address(addr))
+                    a_ca_copy = m.addAction(_("Copy Cash Account"), lambda x=None, text=ca_text_em: doCopy(text))
+                    a = m.addAction(_("Details") + "...", lambda x=None,ca_text=ca_text: cashacctqt.cash_account_detail_dialog(self.parent, ca_text))
                     a = m.addAction(_("View registration tx") + "...", lambda x=None, ca=ca_info: self.parent.do_process_from_txid(txid=ca.txid))
                     a = a_def = m.addAction(_("Make default for address"), lambda x=None, ca=ca_info: self._ca_set_default(ca, True))
                     if ca_info == ca_default:
+                        if where_to_insert_dupe_copy_cash_account and a_ca_copy:
+                            # insert a dupe of "Copy Cash Account" for the default cash account for this address in the top-level menu
+                            menu.insertAction(where_to_insert_dupe_copy_cash_account, a_ca_copy)
                         m.setTitle(m.title() + "    " + "★")
                         a_def.setDisabled(True)
                         a_def.setCheckable(True)
@@ -334,11 +385,7 @@ class AddressList(MyTreeWidget):
             else:
                 a1.setText(_("No Cash Accounts"))
             a_new = menu.addAction(_("Register new..."), lambda x=None, addr=addr: self.parent.register_new_cash_account(addr))
-            if not ca_list and __class__._cashacct_icon:
-                # we only add an icon if there are no cashaccounts
-                # for this address. This is because the icon alongside the emojis
-                # made the ui look too "busy"...
-                a_new.setIcon(__class__._cashacct_icon)
+            a_new.setIcon(__class__._cashacct_icon)
 
 
         run_hook('receive_menu', menu, addrs, self.wallet)
@@ -388,7 +435,7 @@ class AddressList(MyTreeWidget):
     def _ca_update_chash(self, ca_info, minimal_chash):
         ''' Called in GUI thread as a result of the cash account subsystem
         figuring out that a collision_hash can be represented shorter.
-        Kicked off by a get_minimal_chash() call. '''
+        Kicked off by a get_minimal_chash() call that results in a cache miss. '''
         if self.cleaned_up:
             return
         items = self.findItems(ca_info.address.to_ui_string(), Qt.MatchContains|Qt.MatchWrap|Qt.MatchRecursive, 0) or []
@@ -408,7 +455,6 @@ class AddressList(MyTreeWidget):
         round-trip determined that the minimal collision hash can be shorter.'''
         if (event == 'ca_updated_minimal_chash'
                 and not self.cleaned_up
-                and len(args) >= 3
                 and args[0] is self.wallet.cashacct):
             self._ca_minimal_chash_updated_signal.emit(args[1], args[2])
 
@@ -422,4 +468,7 @@ class AddressList(MyTreeWidget):
         self.wallet.cashacct.set_address_default(ca_info)
         if show_tip:
             QToolTip.showText(QCursor.pos(), _("Cash Account has been made the default for this address"), self)
+        self.parent.ca_address_default_changed_signal.emit(ca_info)  # eventually calls self.update
+
+    def _ca_on_address_default_change(self, ignored):
         self.update()

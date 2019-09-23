@@ -1,17 +1,16 @@
 package org.electroncash.electroncash3
 
-import android.arch.lifecycle.MutableLiveData
-import android.arch.lifecycle.Observer
-import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Bundle
-import android.support.v4.app.DialogFragment
-import android.support.v7.preference.EditTextPreference
-import android.support.v7.preference.ListPreference
-import android.support.v7.preference.Preference
-import android.support.v7.preference.PreferenceFragmentCompat
-import android.support.v7.preference.PreferenceGroup
-import android.support.v7.preference.PreferenceManager
+import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.DialogFragment
+import androidx.lifecycle.observe
+import androidx.preference.EditTextPreference
+import androidx.preference.ListPreference
+import androidx.preference.Preference
+import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.PreferenceGroup
+import androidx.preference.PreferenceManager
 import com.chaquo.python.PyObject
 
 
@@ -21,7 +20,19 @@ lateinit var settings: LivePreferences
 fun initSettings() {
     val sp = PreferenceManager.getDefaultSharedPreferences(app)
     settings = LivePreferences(sp)
+    setDefaultValues(sp)
 
+    settings.getBoolean("cashaddr_format").observeForever {
+        clsAddress.callAttr("show_cashaddr", it)
+    }
+    settings.getString("base_unit").observeForever {
+        unitName = it!!
+        unitPlaces = libUtil.get("base_units")!!.callAttr("get", it)!!.toInt()
+    }
+}
+
+
+fun setDefaultValues(sp: SharedPreferences) {
     // Network
     setDefaultValue(sp, "auto_connect",
                     libNetwork.get("DEFAULT_AUTO_CONNECT")!!.toBoolean())
@@ -29,7 +40,13 @@ fun initSettings() {
     // the same effect of making the daemon choose a random server.
     setDefaultValue(sp, "server", "")
 
+    // Transactions
+    setDefaultValue(sp, "confirmed_only",
+                    libWallet.get("DEFAULT_CONFIRMED_ONLY")!!.toBoolean())
+
     // Appearance
+    setDefaultValue(sp, "cashaddr_format",
+                    clsAddress.get("FMT_UI") == clsAddress.get("FMT_CASHADDR"))
     setDefaultValue(sp, "block_explorer", libWeb.get("DEFAULT_EXPLORER")!!.toString())
 
     // Fiat
@@ -43,7 +60,6 @@ fun initSettings() {
     PreferenceManager.setDefaultValues(app, R.xml.settings, true)
 }
 
-
 fun setDefaultValue(sp: SharedPreferences, key: String, default: Boolean) {
     if (!sp.contains(key)) sp.edit().putBoolean(key, default).apply()
 }
@@ -53,21 +69,20 @@ fun setDefaultValue(sp: SharedPreferences, key: String, default: String) {
 }
 
 
-class SettingsFragment : PreferenceFragmentCompat(), MainFragment {
-    override val title = MutableLiveData<String>().apply {
-        value = app.getString(R.string.settings)
-    }
+class SettingsActivity : AppCompatActivity(R.layout.settings)
 
+class SettingsFragment : PreferenceFragmentCompat() {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         setPreferencesFromResource(R.xml.settings, rootKey)
 
         // Appearance
+        setEntries("base_unit", py.builtins.callAttr("list", libUtil.get("base_units")!!))
         setEntries("block_explorer", libWeb.callAttr("BE_sorted_list"))
 
         // Fiat
         val currencies = libExchange.callAttr("get_exchanges_by_ccy", false)
         setEntries("currency", py.builtins.callAttr("sorted", currencies))
-        settings.getString("currency").observe(this, Observer { currency ->
+        settings.getString("currency").observe(this, { currency ->
             val prefExchange = findPreference("use_exchange") as ListPreference
             setEntries("use_exchange",
                        py.builtins.callAttr("sorted", currencies.callAttr("get", currency)))
@@ -94,25 +109,16 @@ class SettingsFragment : PreferenceFragmentCompat(), MainFragment {
             if (pref is PreferenceGroup) {
                 observeGroup(pref)
             } else if (pref is EditTextPreference) {
-                settings.getString(pref.key).observe(this, Observer {
+                settings.getString(pref.key).observe(this, {
                     pref.text = it
                     pref.summary = pref.text
                 })
             } else if (pref is ListPreference) {
-                settings.getString(pref.key).observe(this, Observer {
+                settings.getString(pref.key).observe(this, {
                     pref.value = it
                     pref.summary = pref.entry
                 })
             }
-        }
-    }
-
-    override fun onPreferenceTreeClick(preference: Preference): Boolean {
-        if (preference.key == "console") {
-            startActivity(Intent(activity!!, ECConsoleActivity::class.java))
-            return true
-        } else {
-            return super.onPreferenceTreeClick(preference)
         }
     }
 

@@ -9,7 +9,6 @@ import webbrowser
 from collections import namedtuple
 from functools import partial, wraps
 
-from electroncash.i18n import _
 from electroncash.address import Address
 from electroncash.util import print_error, PrintError, Weak, finalization_print_error
 from electroncash.wallet import Abstract_Wallet
@@ -35,6 +34,8 @@ pr_icons = {
     PR_EXPIRED:":icons/expired.svg"
 }
 
+def _(message): return message
+
 pr_tooltips = {
     PR_UNPAID:_('Pending'),
     PR_PAID:_('Paid'),
@@ -47,6 +48,10 @@ expiration_values = [
     (_('1 week'), 7*24*60*60),
     (_('Never'), None)
 ]
+
+del _
+from electroncash.i18n import _
+
 
 
 class EnterButton(QPushButton):
@@ -87,41 +92,60 @@ class WWLabel(QLabel):
         self.setWordWrap(True)
         self.setTextInteractionFlags(self.textInteractionFlags() | Qt.TextSelectableByMouse)
 
-
-class HelpLabel(QLabel):
-
-    def __init__(self, text, help_text):
-        QLabel.__init__(self, text)
+# --- Help widgets
+class HelpMixin:
+    def __init__(self, help_text, *, custom_parent=None):
+        assert isinstance(self, QWidget), "HelpMixin must be a QWidget instance!"
         self.help_text = help_text
-        self.app = QCoreApplication.instance()
-        self.font = QFont()
+        self.custom_parent = custom_parent
+        if isinstance(self, QLabel):
+            self.setTextInteractionFlags(
+                (self.textInteractionFlags() | Qt.TextSelectableByMouse)
+                & ~Qt.TextSelectableByKeyboard)
+
+    def show_help(self):
+        QMessageBox.information(self.custom_parent or self, _('Help'), self.help_text)
+
+class HelpLabel(HelpMixin, QLabel):
+    def __init__(self, text, help_text, *, custom_parent=None):
+        QLabel.__init__(self, text)
+        HelpMixin.__init__(self, help_text, custom_parent=custom_parent)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.font = self.font()
 
     def mouseReleaseEvent(self, x):
-        QMessageBox.information(self, 'Help', self.help_text)
+        self.show_help()
 
     def enterEvent(self, event):
         self.font.setUnderline(True)
         self.setFont(self.font)
-        self.app.setOverrideCursor(QCursor(Qt.PointingHandCursor))
         return QLabel.enterEvent(self, event)
 
     def leaveEvent(self, event):
         self.font.setUnderline(False)
         self.setFont(self.font)
-        self.app.setOverrideCursor(QCursor(Qt.ArrowCursor))
         return QLabel.leaveEvent(self, event)
 
-
-class HelpButton(QPushButton):
-    def __init__(self, text):
-        QPushButton.__init__(self, '?')
-        self.help_text = text
+class HelpButton(HelpMixin, QPushButton):
+    def __init__(self, text, *, button_text='?', fixed_size=True, icon=None,
+                 tool_tip=None, custom_parent=None):
+        QPushButton.__init__(self, button_text or '')
+        HelpMixin.__init__(self, text, custom_parent=custom_parent)
+        self.setToolTip(tool_tip or _("Show help"))
+        self.setCursor(QCursor(Qt.PointingHandCursor))
         self.setFocusPolicy(Qt.NoFocus)
-        self.setFixedWidth(20)
-        self.clicked.connect(self.onclick)
+        if fixed_size:
+            self.setFixedWidth(20)
+        if icon:
+            self.setIcon(icon)
+        self.clicked.connect(self.show_help)
+        # The below is for older plugins that may have relied on the existence
+        # of this method.  The older version of this class provided this method.
+        # Delete this line some day.
+        self.onclick = self.show_help
 
-    def onclick(self):
-        QMessageBox.information(self, 'Help', self.help_text)
+# --- /Help widgets
+
 
 class Buttons(QHBoxLayout):
     def __init__(self, *buttons):
@@ -132,13 +156,13 @@ class Buttons(QHBoxLayout):
 
 class CloseButton(QPushButton):
     def __init__(self, dialog):
-        QPushButton.__init__(self, _("Close"))
+        QPushButton.__init__(self, _("C&lose"))
         self.clicked.connect(dialog.close)
         self.setDefault(True)
 
 class CopyButton(QPushButton):
     def __init__(self, text_getter, app=None, callback=None):
-        QPushButton.__init__(self, _("Copy"))
+        QPushButton.__init__(self, _("&Copy"))
         if not app:
             app = QApplication.instance()
         self.clicked.connect(lambda: app.clipboard().setText(text_getter()))
@@ -147,20 +171,20 @@ class CopyButton(QPushButton):
 
 class CopyCloseButton(QPushButton):
     def __init__(self, text_getter, app, dialog):
-        QPushButton.__init__(self, _("Copy and Close"))
+        QPushButton.__init__(self, _("&Copy and Close"))
         self.clicked.connect(lambda: app.clipboard().setText(text_getter()))
         self.clicked.connect(dialog.close)
         self.setDefault(True)
 
 class OkButton(QPushButton):
     def __init__(self, dialog, label=None):
-        QPushButton.__init__(self, label or _("OK"))
+        QPushButton.__init__(self, label or _("&OK"))
         self.clicked.connect(dialog.accept)
         self.setDefault(True)
 
 class CancelButton(QPushButton):
     def __init__(self, dialog, label=None):
-        QPushButton.__init__(self, label or _("Cancel"))
+        QPushButton.__init__(self, label or _("C&ancel"))
         self.clicked.connect(dialog.reject)
 
 class MessageBoxMixin:
@@ -357,8 +381,10 @@ class WaitingDialog(WindowModalDialog):
 
 def line_dialog(parent, title, label, ok_label, default=None,
                 *, linkActivated=None, placeholder=None, disallow_empty=False,
-                icon=None):
+                icon=None, line_edit_widget=None):
     dialog = WindowModalDialog(parent, title)
+    dialog.setObjectName('WindowModalDialog - ' + title)
+    destroyed_print_error(dialog)  # track object lifecycle
     dialog.setMinimumWidth(500)
     l = QVBoxLayout()
     dialog.setLayout(l)
@@ -378,7 +404,7 @@ def line_dialog(parent, title, label, ok_label, default=None,
     if linkActivated:
         lbl.linkActivated.connect(linkActivated)
         lbl.setTextInteractionFlags(lbl.textInteractionFlags()|Qt.LinksAccessibleByMouse)
-    txt = QLineEdit()
+    txt = line_edit_widget or QLineEdit()
     if default:
         txt.setText(default)
     if placeholder:
@@ -509,6 +535,10 @@ class MyTreeWidget(QTreeWidget):
     # If None, nothing is applied (items are presented in the order they are
     # added).
     default_sort : SortSpec = None
+
+    # Specify this in subclasses to enable substring search/filtering (Ctrl+F)
+    # (if empty, no search is applied)
+    filter_columns = []
 
     def __init__(self, parent, create_menu, headers, stretch_column=None,
                  editable_columns=None,
@@ -702,6 +732,8 @@ class MyTreeWidget(QTreeWidget):
 
     def filter(self, p):
         columns = self.__class__.filter_columns
+        if not columns:
+            return
         p = p.lower()
         self.current_filter = p
         for item in self.get_leaves(self.invisibleRootItem()):
@@ -753,17 +785,32 @@ class OverlayControlMixin:
             x -= scrollbar_width
         self.overlay_widget.move(x, y)
 
-    def addWidget(self, widget: QWidget):
-        # The old code positioned the items the other way around, so we just insert at position 0 instead
-        self.overlay_layout.insertWidget(0, widget)
+    def addWidget(self, widget: QWidget, index: int = None):
+        if index is not None:
+            self.overlay_layout.insertWidget(index, widget)
+        else:
+            self.overlay_layout.addWidget(widget)
 
-    def addButton(self, icon_name: str, on_click, tooltip: str) -> QAbstractButton:
+    def addButton(self, icon_name: str, on_click, tooltip: str, index : int = None,
+                  *, text : str = None) -> QAbstractButton:
+        ''' icon_name may be None but then you must define text (which is
+        hopefully then some nice Unicode character). Both cannot be None.
+
+        `on_click` is the callable to connect to the button.clicked signal.
+
+        Use `index` to insert it not at the end of the layout by anywhere in the
+        layout. If None, it will be appended to the right of the layout. '''
         button = QPushButton(self.overlay_widget)
         button.setToolTip(tooltip)
         button.setCursor(QCursor(Qt.PointingHandCursor))
-        button.setIcon(QIcon(icon_name))
+        if icon_name:
+            button.setIcon(QIcon(icon_name))
+        elif text:
+            button.setText(text)
+        if not icon_name and not text:
+            raise AssertionError('OverlayControlMixin.addButton: Button must have either icon_name or text defined!')
         button.clicked.connect(on_click)
-        self.addWidget(button)
+        self.addWidget(button, index)
         return button
 
     def addCopyButton(self) -> QAbstractButton:
@@ -772,6 +819,19 @@ class OverlayControlMixin:
     def on_copy(self):
         QApplication.instance().clipboard().setText(self.text())
         QToolTip.showText(QCursor.pos(), _("Text copied to clipboard"), self)
+
+    def keyPressEvent(self, e):
+        if not self.hasFocus():
+            # Ignore keypress when we're not focused like when the focus is on a button
+            e.ignore()
+            return
+        super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if not self.hasFocus():
+            e.ignore()
+            return
+        super().keyReleaseEvent(e)
 
 class ButtonsLineEdit(OverlayControlMixin, QLineEdit):
     def __init__(self, text=None):
@@ -823,7 +883,7 @@ class TaskThread(PrintError, QThread):
                 try:
                     result = task.task()
                     self.doneSig.emit(result, task.cb_done, task.cb_success)
-                except BaseException:
+                except:
                     self.doneSig.emit(sys.exc_info(), task.cb_done, task.cb_error)
         finally:
             self.print_error("exiting")
@@ -865,7 +925,9 @@ class ColorScheme:
     dark_scheme = False
 
     GREEN = ColorSchemeItem("#117c11", "#8af296")
+    SLPGREEN = ColorSchemeItem("#25863f", "#8af296") # darker alternative: ColorSchemeItem("#25863f", "#60bc70")
     YELLOW = ColorSchemeItem("#897b2a", "#ffff00")
+    PINK = ColorSchemeItem("#9c4444", "#ffbaba")
     RED = ColorSchemeItem("#7c1111", "#f18c8c")
     BLUE = ColorSchemeItem("#123b7c", "#8cb3f2")
     DEFAULT = ColorSchemeItem("black", "white")
@@ -1170,6 +1232,28 @@ def webopen(url: str):
             sys.exit(0)
     else:
         webbrowser.open(url)
+
+class TextBrowserKeyboardFocusFilter(QTextBrowser):
+    """
+    This is a QTextBrowser that only enables keyboard text selection when the focus reason is
+    keyboard shortcuts or when a key is pressed while focused. Any other focus reason will
+    deactivate keyboard text selection.
+    """
+
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+
+    def focusInEvent(self, e: QFocusEvent):
+        if e.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason):
+            # Focused because of Tab, Shift+Tab or keyboard accelerator
+            self.setTextInteractionFlags(self.textInteractionFlags() | Qt.TextSelectableByKeyboard)
+        else:
+            self.setTextInteractionFlags(self.textInteractionFlags() & ~Qt.TextSelectableByKeyboard)
+        super().focusInEvent(e)
+
+    def keyPressEvent(self, e: QKeyEvent):
+        self.setTextInteractionFlags(self.textInteractionFlags() | Qt.TextSelectableByKeyboard)
+        super().keyPressEvent(e)
 
 if __name__ == "__main__":
     app = QApplication([])

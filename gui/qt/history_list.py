@@ -183,11 +183,25 @@ class HistoryList(MyTreeWidget):
         if not self.wallet: return # can happen on startup if this is called before self.on_update()
         item = self._item_cache.get(tx_hash)
         if item:
+            idx = self.invisibleRootItem().indexOfChild(item)
+            was_cur = False
+            if idx > -1:
+                # We must take the child out of the view when updating.
+                # This is because otherwise for widgets with many thousands of
+                # items, this method becomes *horrendously* slow (500ms per
+                # call!)... but doing this hack makes it fast (~1ms per call).
+                was_cur = self.currentItem() is item
+                self.invisibleRootItem().takeChild(idx)
             status, status_str = self.wallet.get_tx_status(tx_hash, height, conf, timestamp)
             icon = self._get_icon_for_status(status)
             if icon: item.setIcon(0, icon)
             item.setData(0, SortableTreeWidgetItem.DataRole, (status, conf))
             item.setText(2, status_str)
+            if idx > -1:
+                # Now, put the item back again
+                self.invisibleRootItem().insertChild(idx, item)
+                if was_cur:
+                    self.setCurrentItem(item)
         elif self.should_defer_update_incr():
             return False
         return bool(item)  # indicate to client code whether an actual update occurred
@@ -211,19 +225,18 @@ class HistoryList(MyTreeWidget):
         height, conf, timestamp = self.wallet.get_tx_height(tx_hash)
         tx = self.wallet.transactions.get(tx_hash)
         if not tx: return # this happens sometimes on wallet synch when first starting up.
-        is_relevant, is_mine, v, fee = self.wallet.get_wallet_delta(tx)
         is_unconfirmed = height <= 0
         pr_key = self.wallet.invoices.paid.get(tx_hash)
 
         menu = QMenu()
 
-        menu.addAction(_("Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data.strip()))
+        menu.addAction(_("&Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data.strip()))
         if column in self.editable_columns:
             # We grab a fresh reference to the current item, as it has been deleted in a reported issue.
-            menu.addAction(_("Edit {}").format(column_title),
+            menu.addAction(_("&Edit {}").format(column_title),
                 lambda: self.currentItem() and self.editItem(self.currentItem(), column))
         label = self.wallet.get_label(tx_hash) or None
-        menu.addAction(_("Details"), lambda: self.parent.show_transaction(tx, label))
+        menu.addAction(_("&Details"), lambda: self.parent.show_transaction(tx, label))
         if is_unconfirmed and tx:
             child_tx = self.wallet.cpfp(tx, 0)
             if child_tx:

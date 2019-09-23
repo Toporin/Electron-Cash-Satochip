@@ -26,6 +26,7 @@ import os, sys, re, json, time
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal as PyDecimal  # Qt 5.12 also exports Decimal
+from functools import lru_cache
 import traceback
 import threading
 import hmac
@@ -34,8 +35,7 @@ import inspect, weakref
 import itertools
 import subprocess
 from locale import localeconv
-
-from .i18n import _
+from abc import ABC, abstractmethod
 
 import queue
 
@@ -47,7 +47,12 @@ base_units = {'BCH':8, 'mBCH':5, 'bits':2}
 inv_base_units = inv_dict(base_units)
 base_unit_labels = tuple(inv_base_units[dp] for dp in sorted(inv_base_units.keys(), reverse=True))  # ('BCH', 'mBCH', 'bits')
 
+def _(message): return message
+
 fee_levels = [_('Within 25 blocks'), _('Within 10 blocks'), _('Within 5 blocks'), _('Within 2 blocks'), _('In the next block')]
+
+del _
+from .i18n import _, ngettext
 
 class NotEnoughFunds(Exception): pass
 
@@ -84,7 +89,7 @@ class MyEncoder(json.JSONEncoder):
         return super(MyEncoder, self).default(obj)
 
 class PrintError:
-    '''A handy base class'''
+    '''A handy base class for printing formatted log messages'''
     def diagnostic_name(self):
         return self.__class__.__name__
 
@@ -98,14 +103,31 @@ class PrintError:
     def print_msg(self, *msg):
         print_msg("[%s]" % self.diagnostic_name(), *msg)
 
-class ThreadJob(PrintError):
+    SPAM_MSG_RATE_LIMIT = 1.0  # Once every second
+    _print_error_last_spam_msg = 0.0
+    def _spam_common(self, method, *args):
+        '''Used internally to control spam messages. *All* messages called with
+        spam_* are suppressed to max once every SPAM_MSG_RATE_LIMIT seconds'''
+        now = time.time()
+        if now - self._print_error_last_spam_msg >= self.SPAM_MSG_RATE_LIMIT:
+            method(*args)
+            self._print_error_last_spam_msg = now
+    def spam_error(self, *args):
+        ''' Like self.print_error except it only prints the supplied args
+        once every self.SPAM_MSG_RATE_LIMIT seconds. '''
+        self._spam_common(self.print_error, *args)
+    def spam_msg(self, *args): self._spam_common(self.print_msg, *args)
+    def spam_stderr(self, *args): self._spam_common(self.print_stderr, *args)
+
+
+class ThreadJob(ABC, PrintError):
     """A job that is run periodically from a thread's main loop.  run() is
     called from that thread's context.
     """
 
+    @abstractmethod
     def run(self):
         """Called periodically from the thread"""
-        pass
 
 class DebugMem(ThreadJob):
     '''A handy class for debugging GC memory leaks'''
@@ -214,13 +236,6 @@ class DaemonThread(threading.Thread, PrintError):
             self.running = False
 
     def on_stop(self):
-        if 'ANDROID_DATA' in os.environ:
-            try:
-                import jnius
-                jnius.detach()
-                self.print_error("jnius detach")
-            except ImportError:
-                pass  # Chaquopy detaches automatically.
         self.print_error("stopped")
 
 
@@ -274,16 +289,23 @@ def print_error(*args):
         args = ("|%7.3f|"%(time.time() - _t0), *args)
     print_stderr(*args)
 
+_print_lock = threading.RLock()  # use a recursive lock in extremely rare case a signal handler does a print_error while lock held by same thread as sighandler invocation's thread
+def _print_common(file, *args):
+    s_args = " ".join(str(item) for item in args) + "\n"  # newline at end *should* implicitly .flush() underlying stream, but not always if redirecting to file
+    with _print_lock:
+        # locking is required here as TextIOWrapper subclasses are not thread-safe;
+        # see: https://docs.python.org/3.6/library/io.html#multi-threading
+        try:
+            file.write(s_args)
+            file.flush()  # necessary if redirecting to file
+        except OSError:
+            '''In very rare cases IO errors can occur here. We tolerate them. See #1595.'''
+
 def print_stderr(*args):
-    args = [str(item) for item in args]
-    sys.stderr.write(" ".join(args) + "\n")
-    sys.stderr.flush()
+    _print_common(sys.stderr, *args)
 
 def print_msg(*args):
-    # Stringify args
-    args = [str(item) for item in args]
-    sys.stdout.write(" ".join(args) + "\n")
-    sys.stdout.flush()
+    _print_common(sys.stdout, *args)
 
 def json_encode(obj):
     try:
@@ -316,32 +338,12 @@ def profiler(func):
     return lambda *args, **kw_args: do_profile(args, kw_args)
 
 
-def android_ext_dir():
-    try:
-        import jnius
-        env = jnius.autoclass('android.os.Environment')
-    except ImportError:
-        from android.os import Environment as env  # Chaquopy import hook
-    return env.getExternalStorageDirectory().getPath()
-
+@lru_cache()
 def android_data_dir():
-    try:
-        import jnius
-        context = jnius.autoclass('org.kivy.android.PythonActivity').mActivity
-    except ImportError:
-        from com.chaquo.python import Python
-        context = Python.getPlatform().getApplication()
+    from com.chaquo.python import Python
+    context = Python.getPlatform().getApplication()
     return context.getFilesDir().getPath() + '/data'
 
-def android_headers_dir():
-    try:
-        import jnius
-        d = android_ext_dir() + '/org.electron.electron'
-        if not os.path.exists(d):
-            os.mkdir(d)
-        return d
-    except ImportError:
-        return android_data_dir()
 
 def ensure_sparse_file(filename):
     if os.name == "nt":
@@ -351,7 +353,7 @@ def ensure_sparse_file(filename):
             pass
 
 def get_headers_dir(config):
-    return android_headers_dir() if 'ANDROID_DATA' in os.environ else config.path
+    return android_data_dir() if 'ANDROID_DATA' in os.environ else config.path
 
 def assert_datadir_available(config_path):
     path = config_path
@@ -475,6 +477,8 @@ def make_dir(path):
 def format_satoshis_plain(x, decimal_point = 8):
     """Display a satoshi amount scaled.  Always uses a '.' as a decimal
     point and has no thousands separator"""
+    if x is None:
+        return _('Unknown')
     scale_factor = pow(10, decimal_point)
     return "{:.8f}".format(PyDecimal(x) / scale_factor).rstrip('0').rstrip('.')
 
@@ -486,7 +490,7 @@ _fmt_sats_cache = ExpiringCache(maxlen=20000, name='format_satoshis cache')
 def format_satoshis(x, num_zeros=0, decimal_point=8, precision=None, is_diff=False, whitespaces=False):
     global _cached_dp
     if x is None:
-        return 'unknown'
+        return _('Unknown')
     if precision is None:
         precision = decimal_point
     cache_key = (x,num_zeros,decimal_point,precision,is_diff,whitespaces)
@@ -538,55 +542,71 @@ def format_time(timestamp):
 # Takes a timestamp and returns a string with the approximation of the age
 def age(from_date, since_date = None, target_tz=None, include_seconds=False):
     if from_date is None:
-        return "Unknown"
+        return _("Unknown")
 
-    from_date = datetime.fromtimestamp(from_date)
-    if since_date is None:
-        since_date = datetime.now(target_tz)
+    try:
+        from_date = datetime.fromtimestamp(from_date)
+        if since_date is None:
+            since_date = datetime.now(target_tz)
+        else:
+            if isinstance(since_date, (int, float)):
+                since_date = datetime.fromtimestamp(since_date)
+    except ValueError:
+        return _("Error")
 
     td = time_difference(from_date - since_date, include_seconds)
-    return td + " ago" if from_date < since_date else "in " + td
+
+    if from_date < since_date:
+        return _("{time} ago").format(time=td)
+    else:
+        return _("in {time}").format(time=td)
 
 
 def time_difference(distance_in_time, include_seconds):
-    #distance_in_time = since_date - from_date
+    #distance_in_time = from_date - since_date
     distance_in_seconds = int(round(abs(distance_in_time.days * 86400 + distance_in_time.seconds)))
-    distance_in_minutes = int(round(distance_in_seconds/60))
+    distance_in_minutes = int(round(distance_in_seconds / 60))
 
-    if distance_in_minutes <= 1:
+    if distance_in_seconds < 60:
         if include_seconds:
             for remainder in [5, 10, 20]:
                 if distance_in_seconds < remainder:
-                    return "less than %s seconds" % remainder
+                    return _("less than {seconds} seconds").format(seconds=remainder)
             if distance_in_seconds < 40:
-                return "half a minute"
-            elif distance_in_seconds < 60:
-                return "less than a minute"
+                return _("half a minute")
             else:
-                return "1 minute"
+                return _("about a minute")
         else:
-            if distance_in_minutes == 0:
-                return "less than a minute"
-            else:
-                return "1 minute"
+            return _("less than a minute")
+    elif distance_in_seconds < 90:
+        return _("about a minute")
     elif distance_in_minutes < 45:
-        return "%s minutes" % distance_in_minutes
+        fmt = ngettext("{minutes} minute", "{minutes} minutes", distance_in_minutes)
+        return fmt.format(minutes=distance_in_minutes)
     elif distance_in_minutes < 90:
-        return "about 1 hour"
+        return _("about 1 hour")
     elif distance_in_minutes < 1440:
-        return "about %d hours" % (round(distance_in_minutes / 60.0))
-    elif distance_in_minutes < 2880:
-        return "1 day"
+        distance_in_hours = round(distance_in_minutes / 60.0)
+        fmt = ngettext("{hours} hour", "{hours} hours", distance_in_hours)
+        return fmt.format(hours=distance_in_hours)
+    elif distance_in_minutes < 2160:
+        return _("about 1 day")
     elif distance_in_minutes < 43220:
-        return "%d days" % (round(distance_in_minutes / 1440))
-    elif distance_in_minutes < 86400:
-        return "about 1 month"
+        distance_in_days = round(distance_in_minutes / 1440.0)
+        fmt = ngettext("{days} day", "{days} days", distance_in_days)
+        return fmt.format(days=distance_in_days)
+    elif distance_in_minutes < 64830:
+        return _("about 1 month")
     elif distance_in_minutes < 525600:
-        return "%d months" % (round(distance_in_minutes / 43200))
-    elif distance_in_minutes < 1051200:
-        return "about 1 year"
+        distance_in_months = round(distance_in_minutes / 43200.0)
+        fmt = ngettext("{months} month", "{months} months", distance_in_months)
+        return fmt.format(months=distance_in_months)
+    elif distance_in_minutes < 788400:
+        return _("about 1 year")
     else:
-        return "over %d years" % (round(distance_in_minutes / 525600))
+        distance_in_years = round(distance_in_minutes / 525600.0)
+        fmt = ngettext("{years} year", "{years} years", distance_in_years)
+        return fmt.format(years=distance_in_years)
 
 # Python bug (http://bugs.python.org/issue1927) causes raw_input
 # to be redirected improperly between stdin/stderr on Unix systems
@@ -653,17 +673,30 @@ import socket
 import ssl
 
 class SocketPipe(PrintError):
-    def __init__(self, socket):
+    class MessageSizeExceeded(RuntimeError):
+        ''' Raised by get() if max_message_bytes is set and the message size
+        limit was exceeded. '''
+
+    def __init__(self, socket, *, max_message_bytes=0):
+        ''' A max_message_bytes of <= 0 means unlimited, otherwise a positive
+        value indicates this many bytes to limit the message size by. This is
+        used by get(), which will raise MessageSizeExceeded if the message size
+        received is larger than max_message_bytes. '''
         self.socket = socket
         self.message = b''
         self.set_timeout(0.1)
         self.recv_time = time.time()
+        self.max_message_bytes = max_message_bytes
 
     def set_timeout(self, t):
         self.socket.settimeout(t)
 
     def idle_time(self):
         return time.time() - self.recv_time
+
+    def clean_up(self):
+        ''' Clears the receive buffer to make sure no garbage data remains '''
+        self.message = b''
 
     def get(self):
         while True:
@@ -694,6 +727,9 @@ class SocketPipe(PrintError):
                 return None
             self.message += data
             self.recv_time = time.time()
+
+            if self.max_message_bytes > 0 and len(self.message) > self.max_message_bytes:
+                raise self.MessageSizeExceeded(f"Message limit is: {self.max_message_bytes}; message buffer exceeded this limit!")
 
     def send(self, request):
         out = json.dumps(request) + '\n'

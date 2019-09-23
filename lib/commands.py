@@ -35,7 +35,7 @@ from decimal import Decimal as PyDecimal  # Qt 5.12 also exports Decimal
 from .import util
 from .util import bfh, bh2u, format_satoshis, json_decode, print_error, to_bytes
 from .import bitcoin
-from .address import Address
+from .address import Address, AddressError
 from .bitcoin import hash_160, COIN, TYPE_ADDRESS
 from .i18n import _
 from .transaction import Transaction, multisig_script
@@ -150,6 +150,20 @@ class Commands:
         for k in d.keys():
             d[k] = DoChk(d[k])
         return d
+
+    @command('')
+    def addressconvert(self, address):
+        """Convert to/from Legacy <-> Cash Address.  Address can be either
+        a legacy or a Cash Address and both forms will be returned as a JSON
+        dict."""
+        try:
+            addr = Address.from_string(address)
+        except Exception as e:
+            raise AddressError(f'Invalid address: {address}') from e
+        return {
+            'cashaddr' : addr.to_full_string(Address.FMT_CASHADDR),
+            'legacy'   : addr.to_full_string(Address.FMT_LEGACY),
+        }
 
     @command('')
     def commands(self):
@@ -271,20 +285,18 @@ class Commands:
                 txin['num_sig'] = 1
 
         outputs = [(TYPE_ADDRESS, Address.from_string(x['address']), int(x['value'])) for x in outputs]
-        tx = Transaction.from_io(inputs, outputs, locktime=locktime)
+        tx = Transaction.from_io(inputs, outputs, locktime=locktime, sign_schnorr=self.wallet and self.wallet.is_schnorr_enabled())
         tx.sign(keypairs)
         return tx.as_dict()
 
     @command('wp')
     def signtransaction(self, tx, privkey=None, password=None):
         """Sign a transaction. The wallet keys will be used unless a private key is provided."""
-        tx = Transaction(tx)
+        tx = Transaction(tx, sign_schnorr=self.wallet and self.wallet.is_schnorr_enabled())
         if privkey:
             txin_type, privkey2, compressed = bitcoin.deserialize_privkey(privkey)
             pubkey = bitcoin.public_key_from_private_key(privkey2, compressed)
-            h160 = bitcoin.hash_160(bfh(pubkey))
-            x_pubkey = 'fd' + bh2u(b'\x00' + h160)
-            tx.sign({x_pubkey:(privkey2, compressed)})
+            tx.sign({pubkey:(privkey2, compressed)})
         else:
             self.wallet.sign_transaction(tx, password)
         return tx.as_dict()
@@ -653,19 +665,23 @@ class Commands:
         return self.wallet.get_unused_address().to_ui_string()
 
     @command('w')
-    def addrequest(self, amount, memo='', expiration=None, force=False):
+    def addrequest(self, amount, memo='', expiration=None, force=False, payment_url=None):
         """Create a payment request, using the first unused address of the wallet.
         The address will be condidered as used after this operation.
         If no payment is received, the address will be considered as unused if the payment request is deleted from the wallet."""
         addr = self.wallet.get_unused_address()
         if addr is None:
+            if not self.wallet.is_deterministic():
+                self.wallet.print_error("Unable to find an unused address. Please use a deteministic wallet to proceed, then run with the --force option to create new addresses.")
+                return False
             if force:
                 addr = self.wallet.create_new_address(False)
             else:
+                self.wallet.print_error("Unable to find an unused address. Try running with the --force option to create new addresses.")
                 return False
         amount = satoshis(amount)
         expiration = int(expiration) if expiration else None
-        req = self.wallet.make_payment_request(addr, amount, memo, expiration)
+        req = self.wallet.make_payment_request(addr, amount, memo, expiration, payment_url = payment_url)
         self.wallet.add_payment_request(req, self.config)
         out = self.wallet.get_payment_request(addr, self.config)
         return self._format_request(out)
@@ -778,6 +794,7 @@ command_options = {
     'show_addresses': (None, "Show input and output addresses"),
     'show_fiat':   (None, "Show fiat value of transactions"),
     'year':        (None, "Show history for a given year"),
+    'payment_url': (None, 'Optional URL where you would like users to POST the BIP70 Payment message'),
 }
 
 

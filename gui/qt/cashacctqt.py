@@ -31,12 +31,16 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 from .util import *
+from .qrcodewidget import QRCodeWidget
 
 import queue
+import time
+import requests
 from typing import Tuple, List, Callable
 from enum import IntEnum
 from electroncash import cashacct
 from electroncash import util
+from electroncash import web
 from electroncash.address import Address, UnknownAddress
 from electroncash.i18n import _, ngettext
 from electroncash.wallet import Abstract_Wallet
@@ -65,6 +69,7 @@ class VerifyingDialog(WaitingDialog):
             self.open()
         elif auto_exec:
             self.exec_()
+        destroyed_print_error(self)
 
 
 def verify_multiple_blocks(blocks : List[int], parent : MessageBoxMixin, wallet : Abstract_Wallet, timeout=10.0) -> int:
@@ -189,6 +194,23 @@ class ButtonAssociatedLabel(QLabel):
             elif self.but.toolTip() and not self.hasSelectedText():
                 QToolTip.showText(QCursor.pos(), self.but.toolTip(), self)
 
+
+def naked_button_style() -> str:
+    ''' Returns a stylesheet for a small 'naked' (flat) QPushButton button which
+    is used in the lookup results and other associated widgets in this file '''
+    but_style_sheet = 'QPushButton { border-width: 1px; padding: 0px; margin: 0px; }'
+    if not ColorScheme.dark_scheme:
+        but_style_sheet += ''' QPushButton { border: 1px solid transparent; }
+        QPushButton:hover { border: 1px solid #3daee9; }'''
+    return but_style_sheet
+
+def button_make_naked(but: QAbstractButton) -> QAbstractButton:
+    ''' Just applied a bunch of things to a button to "make it naked"
+    which is the look we use for the lookup results and various other odds and
+    ends. Returns the button passed to it. '''
+    but.setStyleSheet(naked_button_style())
+    but.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    return but
 
 class InfoGroupBox(PrintError, QGroupBox):
 
@@ -325,9 +347,13 @@ class InfoGroupBox(PrintError, QGroupBox):
         if self.custom_contents_margins:
             grid.setContentsMargins(*self.custom_contents_margins)
 
-        def view_tx_link_activated(txid):
+        def details_link_activated(castr):
             if isinstance(parent, ElectrumWindow):
-                parent.do_process_from_txid(txid=txid, tx_desc=wallet.get_label(txid))
+                if castr.startswith('txid:'):
+                    txid = castr.split(':', 1)[-1]
+                    parent.do_process_from_txid(txid=txid, tx_desc=wallet.get_label(txid))
+                else:
+                    cash_account_detail_dialog(parent, castr)
 
         def view_addr_link_activated(addr):
             if isinstance(parent, ElectrumWindow):
@@ -338,12 +364,13 @@ class InfoGroupBox(PrintError, QGroupBox):
                     parent.print_error(repr(e))
 
 
-
+        # We do it this way with BUTTON_FACTORY in case we want to expand
+        # this facility later to generate even more dynamic buttons.
         if button_type == __class__.ButtonType.CheckBox:
-            BUTTON_CLASS = QCheckBox
+            BUTTON_FACTORY = lambda *args: QCheckBox()
             but_grp.setExclusive(False)
         else:
-            BUTTON_CLASS = QRadioButton
+            BUTTON_FACTORY = lambda *args: QRadioButton()
             but_grp.setExclusive(True)
         hide_but = button_type == __class__.ButtonType.NoButton
 
@@ -360,8 +387,9 @@ class InfoGroupBox(PrintError, QGroupBox):
             if not col:
                 row += 1
             info, min_chash, ca_string = item
+            ca_string_em = f"{ca_string} {info.emoji}"
             # Radio button (by itself in colum 0)
-            rb = BUTTON_CLASS()
+            rb = BUTTON_FACTORY(info, min_chash, ca_string, ca_string_em)
             rb.setObjectName("InfoGroupBoxButton")
             rb.setHidden(hide_but)
             rb.setDisabled(hide_but)  # hidden buttons also disabled to prevent user clicking their labels to select them
@@ -386,17 +414,19 @@ class InfoGroupBox(PrintError, QGroupBox):
             ca_lbl = ButtonAssociatedLabel(f'<b>{pretty_string}</b><font size=-1><i>{chash_extra}</i></font><b>;</b>', button=rb)
             grid.addWidget(ca_lbl, row*3, col*5+1, 1, 1)
 
-            # View tx ...
-            viewtx = _("View tx")
-            view_tx_lbl = WWLabel(f'<font size=-1><a href="{info.txid}">{viewtx}...</a></font>')
-            grid.addWidget(view_tx_lbl, row*3, col*5+2, 1, 1)
-            view_tx_lbl.setToolTip(_("View Registration Transaction"))
+            # Details and/or View tx ...
+            if not is_valid:
+                # Unsupported account type -- just offer View tx...
+                viewtx = _("View tx")
+                details_lbl = WWLabel(f'<font size=-1><a href="txid:{info.txid}">{viewtx}...</a></font>')
+                details_lbl.setToolTip(_("View Registration Transaction"))
+            else:
+                details = _("Details")
+                details_lbl = WWLabel(f'<font size=-1><a href="{ca_string}">{details}...</a></font>')
+                details_lbl.setToolTip(_("View Details"))
+            grid.addWidget(details_lbl, row*3, col*5+2, 1, 1)
 
             # misc buttons
-            but_style_sheet = 'QPushButton { border-width: 1px; padding: 0px; margin: 0px; }'
-            if not ColorScheme.dark_scheme:
-                but_style_sheet += ''' QPushButton { border: 1px solid transparent; }
-                QPushButton:hover { border: 1px solid #3daee9; }'''
             hbox = QHBoxLayout()
             hbox.setContentsMargins(0,0,0,0)
             hbox.setSpacing(4)
@@ -404,24 +434,24 @@ class InfoGroupBox(PrintError, QGroupBox):
                 if callable(func):
                     ab = func(item)
                     if isinstance(ab, QAbstractButton):
-                        ab.setStyleSheet(but_style_sheet)
-                        ab.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                        button_make_naked(ab)
                         hbox.addWidget(ab)
             # copy button
             copy_but = QPushButton(QIcon(":icons/copy.png"), "")
-            copy_but.setStyleSheet(but_style_sheet)
-            copy_but.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            button_make_naked(copy_but)
             hbox.addWidget(copy_but)
             grid.addLayout(hbox, row*3, col*5+3, 1, 1)
             # end button bar
 
             if isinstance(parent, ElectrumWindow):
-                view_tx_lbl.linkActivated.connect(view_tx_link_activated)
-                copy_but.clicked.connect(lambda ignored=None, ca_string=ca_string, copy_but=copy_but:
-                                             parent.copy_to_clipboard(text=ca_string, tooltip=_('Cash Account copied to clipboard'), widget=copy_but) )
-                copy_but.setToolTip(_("Copy <b>{cash_account_name}</b>").format(cash_account_name=ca_string))
+                details_lbl.linkActivated.connect(details_link_activated)
+                copy_but.clicked.connect(lambda ignored=None, ca_string_em=ca_string_em, copy_but=copy_but:
+                                             parent.copy_to_clipboard(text=ca_string_em, tooltip=_('Cash Account copied to clipboard'), widget=copy_but) )
+                copy_but.setToolTip('<span style="white-space:nowrap">'
+                                    + _("Copy <b>{cash_account_name}</b>").format(cash_account_name=ca_string_em)
+                                    + '</span>')
             else:
-                view_tx_lbl.setHidden(True)
+                details_lbl.setHidden(True)
                 copy_but.setHidden(True)
 
             if self.show_addresses:
@@ -514,7 +544,8 @@ def lookup_cash_account_dialog(
         blurb: str = None,  # will appear in the same label, can be rich text, will get concatenated to title.
         title_label_link_activated_slot: Callable[[str], None] = None,  # if you embed links in the blub, pass a callback to handle them
         button_type: InfoGroupBox.ButtonType = InfoGroupBox.ButtonType.NoButton,  #  see InfoGroupBox
-        add_to_contacts_button: bool = False  # if true, the button bar will include an add to contacts button
+        add_to_contacts_button: bool = False,  # if true, the button bar will include an add to contacts button
+        pay_to_button: bool = False  # if true, the button bar will include a "pay to" button
 ) -> List[Tuple[cashacct.Info, str, str]]:  # Returns a list of tuples
     ''' Shows the generic Cash Account lookup interface. '''
     from .main_window import ElectrumWindow
@@ -568,22 +599,28 @@ def lookup_cash_account_dialog(
     tit_lbl = QLabel()
     vbox.addWidget(tit_lbl)
     extra_buttons = []
+    # Extra Buttons
     if add_to_contacts_button:
         def create_add_to_contacts_button_callback(item: tuple) -> QPushButton:
-            but = QPushButton()
-            but.setIcon(QIcon(":icons/tab_contacts.png"))
-            if isinstance(item[0].address, Address):
-                if item[2] in all_cashacct_contacts or wallet.is_mine(item[0].address):
+            info, min_chash, ca_string = item
+            ca_string_em = wallet.cashacct.fmt_info(info, min_chash, emoji=True)
+            but = QPushButton(QIcon(":icons/tab_contacts.png"), "")
+            if isinstance(info.address, Address):
+                if ca_string in all_cashacct_contacts or wallet.is_mine(info.address):
                     but.setDisabled(True)
-                    but.setToolTip(_("<b>{cash_account}</b> already in Contacts").format(cash_account=item[2]))
+                    but.setToolTip(_('<span style="white-space:nowrap"><b>{cash_account}</b> already in Contacts</span>').format(cash_account=ca_string_em))
                 else:
-                    but.setToolTip(_("Add <b>{cash_account}</b> to Contacts").format(cash_account=item[2]))
+                    add_str = _("Add to Contacts")
+                    but.setToolTip(f'<span style="white-space:nowrap">{add_str}<br>&nbsp;&nbsp;&nbsp;<b>{ca_string_em}</b></span>')
+                    del add_str
                     def add_contact_slot(ign=None, but=but, item=item):
                         # label, address, typ='address') -> str:
-                        if parent.set_contact(label=item[2], address=item[0].address, typ='cashacct'):
-                            msg = _("<b>{cash_account}</b> added to Contacts").format(cash_account=item[2])
+                        new_contact = parent.set_contact(label=ca_string, address=info.address, typ='cashacct')
+                        if new_contact:
+                            msg = _('<span style="white-space:nowrap"><b>{cash_account}</b> added to Contacts</span>').format(cash_account=ca_string_em)
                             but.setDisabled(True)
                             but.setToolTip(msg)
+                            all_cashacct_contacts.add(new_contact.name)
                         else:
                             msg = _("Error occurred adding to Contacts")
                         QToolTip.showText(QCursor.pos(), msg, frame, QRect(), 5000)
@@ -594,6 +631,23 @@ def lookup_cash_account_dialog(
                 but.setToolTip("<i>" + _("Unsupported Account Type") + "</i>")
             return but
         extra_buttons.append(create_add_to_contacts_button_callback)
+    if pay_to_button:
+        def create_payto_but(item):
+            info, min_chash, ca_string = item
+            ca_string_em = wallet.cashacct.fmt_info(info, min_chash, emoji=True)
+            icon_file = ":icons/paper-plane.svg" if not ColorScheme.dark_scheme else ":icons/paper-plane_dark_theme.svg"
+            but = QPushButton(QIcon(icon_file), "")
+            if isinstance(info.address, Address):
+                payto_str = _("Pay to")
+                but.setToolTip(f'<span style="white-space:nowrap">{payto_str}<br>&nbsp;&nbsp;&nbsp;<b>{ca_string_em}</b></span>')
+                but.clicked.connect(lambda: parent.is_alive() and parent.payto_payees([ca_string_em]))
+                but.clicked.connect(d.reject)
+            else:
+                but.setDisabled(True)
+                but.setToolTip("<i>" + _("Unsupported Account Type") + "</i>")
+            return but
+        extra_buttons.append(create_payto_but)
+    # /Extra Buttons
     ca = InfoGroupBox(frame, parent, button_type = button_type, title = '', extra_buttons=extra_buttons)
     ca.refresh()
     frame.setMinimumWidth(765)
@@ -638,9 +692,11 @@ def lookup_cash_account_dialog(
         if tup:
             ca_msg(_("Searching for <b>{cash_account_name}</b> please wait ...").format(cash_account_name=name), True)
             results = None
+            exc = []
+            t0 = time.time()
             def resolve_verify():
                 nonlocal results
-                results = wallet.cashacct.resolve_verify(name)
+                results = wallet.cashacct.resolve_verify(name, exc=exc)
             code = VerifyingDialog(parent.top_level_window(),
                                    _("Verifying Cash Account {name} please wait ...").format(name=name),
                                    resolve_verify, auto_show=False).exec_()
@@ -652,6 +708,18 @@ def lookup_cash_account_dialog(
                 ca.setItems(results, auto_resize_parent=False, title='', button_type = button_type)  # suppress groupbox title
             else:
                 ca_msg(_("The specified Cash Account does not appear to be associated with any address"), True)
+                if time.time()-t0 >= cashacct.timeout:
+                    if (wallet.verifier and wallet.synchronizer and  # check these are still alive: these could potentially go away from under us if wallet is stopped when we get here.
+                            (not wallet.verifier.is_up_to_date() or not wallet.synchronizer.is_up_to_date())):
+                        parent.show_message(_("No results found. However, your wallet is busy updating."
+                                              " This can interfere with Cash Account lookups."
+                                              " You may want to try again when it is done."))
+                    else:
+                        parent.show_message(_("A network timeout occurred while looking up this Cash Account. "
+                                              "You may want to check that your internet connection is up and "
+                                              "not saturated processing other requests."))
+                elif exc and isinstance(exc[-1], requests.ConnectionError):
+                    parent.show_error(_("A network connectivity error occured. Please check your internet connection and try again."))
             nres = len(results or [])
             title =  "<b>" + name + "</b> - " + ngettext("{number} Cash Account", "{number} Cash Accounts", nres).format(number=nres)
             tit_lbl.setText(title)
@@ -668,3 +736,205 @@ def lookup_cash_account_dialog(
     if d.exec_() == QDialog.Accepted:
         return ca.selectedItems()
     return None
+
+
+def cash_account_detail_dialog(parent : MessageBoxMixin,  # Should be an ElectrumWindow instance
+                               ca_string : str,  # Cash acount string eg: "satoshi#123.1
+                               *, title : str = None  # The modal dialog window title
+    ) -> bool:  # returns True on success, False on failure
+    ''' Shows the Cash Account details for any cash account.
+    Note that parent should be a ElectrumWindow instance.
+    `ca_string` is just a Cash Account string of the form:
+        name#number[.collision_hash_prefix]
+    Returns False on failure or True on success. User is presented with an error
+    message box on False return.'''
+    from .main_window import ElectrumWindow
+    assert isinstance(parent, ElectrumWindow)
+    wallet = parent.wallet
+    assert isinstance(wallet, Abstract_Wallet)
+
+    if not wallet.cashacct.parse_string(ca_string):
+        parent.show_error(_("Invalid Cash Account:") + f" {ca_string}")
+        return False
+
+    ca_string = wallet.cashacct.strip_emoji(ca_string)
+
+    # validate ca_string arg & resolve if need be
+    info = wallet.cashacct.get_verified(ca_string)
+    if not info:
+        # need to look it up
+        tup = resolve_cashacct(parent, wallet)
+        if not tup:
+            # Error window was provided by resolve_cashacct, just return
+            return False
+        info, ca_string = tup
+    ca_string_em = ca_string + f" {info.emoji}"
+    parsed = wallet.cashacct.parse_string(ca_string)
+    assert parsed
+    minimal_chash = parsed[-1]
+
+    # . <-- at this point we have a verified cash account to display
+
+    # Make sure it's not an unsupported type as the code at the end of this
+    # file assumes info.address is an Address.
+    if not isinstance(info.address, Address):
+        parent.show_error(_("Unsupported payment data type.") + "\n\n"
+                          + _("The Cash Account {name} uses an account type that "
+                              "is not supported by Electron Cash.").format(name=ca_string))
+        return False
+
+    title = title or _("Cash Account Details")
+    # create dialog window
+    d = WindowModalDialog(parent.top_level_window(), title)
+    d.setObjectName("WindowModalDialog - " + title)
+    finalization_print_error(d)
+    destroyed_print_error(d)
+
+    grid = QGridLayout(d)
+    em_lbl = QLabel(f'<span style="white-space:nowrap; font-size:75pt;">{info.emoji}</span>')
+    em_lbl.setToolTip(f'<span style="white-space:nowrap;">{ca_string_em}</span>')
+    grid.addWidget(em_lbl, 0, 0, 3, 1)
+    fsize = 26
+    if len(info.name) > 20:
+        fsize = 15
+    if len(info.name) > 30:
+        fsize = 12
+    if len(info.name) > 50:
+        fsize = 10
+    if len(info.name) > 90:
+        fsize = 8
+    name_txt = f'<span style="white-space:nowrap; font-size:{fsize}pt; font-weight:bold;">{info.name}<span style="font-size:18pt;">#{info.number}.'
+    if minimal_chash:
+        name_txt += f'{minimal_chash}'
+    name_txt += '</span></span>'
+    if len(minimal_chash) < len(info.collision_hash):
+        if not info.collision_hash.startswith(minimal_chash):
+            parent.print_error(f"WARNING: {ca_string} minimal_chash {minimal_chash} and collision_hash {info.collision_hash} mismatch!")
+        else:
+            extra = info.collision_hash[len(minimal_chash):]
+            name_txt += f'<span style="white-space:nowrap; font-size:11pt; font-weight:200;"><i>{extra}</i></span>'
+
+    def open_link(link):
+        if Address.is_valid(link):
+            addr = Address.from_string(link)
+            if wallet.is_mine(addr):
+                parent.show_address(addr)
+            else:
+                addr_URL = web.BE_URL(parent.config, 'addr', addr)
+                if addr_URL:
+                    webopen(addr_URL)
+            return
+        if link.startswith('http'):
+            webopen(link)
+        elif len(link) == 64:  # 64 character txid
+            tx = wallet.transactions.get(link)
+            if tx:
+                parent.show_transaction(tx, tx_desc=wallet.get_label(link))
+            else:
+                parent.do_process_from_txid(txid=link, tx_desc=wallet.get_label(link))
+            return
+
+    # name
+    name_lbl = QLabel(name_txt)
+    grid.addWidget(name_lbl, 0, 1, 1, 1)
+    # copy name
+    copy_name_but = QPushButton()
+    copy_name_but.setIcon(QIcon(":icons/copy.png"))
+    button_make_naked(copy_name_but)
+    copy_name_but.setToolTip('<span style="white-space:nowrap">'
+                                + _("Copy <b>{cash_account_name}</b>").format(cash_account_name=ca_string_em)
+                                + '</span>')
+    copy_name_but.clicked.connect(lambda ignored=None, ca_string_em=ca_string_em, copy_but=copy_name_but:
+                                    parent.copy_to_clipboard(text=ca_string_em, tooltip=_('Cash Account copied to clipboard'), widget=copy_but) )
+    grid.addWidget(copy_name_but, 0, 2, 1, 1)
+    # address label
+    addr_lbl = QLabel(f'<span style="white-space:nowrap; font-size:15pt;"><a href="{info.address.to_ui_string()}"><pre>{info.address.to_ui_string()}</pre></a></span>')
+    addr_lbl.linkActivated.connect(open_link)
+    grid.addWidget(addr_lbl, 1, 1, 1, 1)
+    # copy address label
+    copy_addr_but = QPushButton()
+    copy_addr_but.setIcon(QIcon(":icons/copy.png"))
+    button_make_naked(copy_addr_but)
+    copy_addr_but.setToolTip(_("Copy {}").format(_("Address")))
+    copy_addr_but.clicked.connect(lambda ignored=None, text=info.address.to_ui_string(), copy_but=copy_addr_but:
+                                    parent.copy_to_clipboard(text=text, tooltip=_('Address copied to clipboard'), widget=copy_but) )
+    grid.addWidget(copy_addr_but, 1, 2, 1, 1)
+
+    if not wallet.is_mine(info.address):
+        ismine_txt = _("External Address") + ', '
+    else:
+        ismine_txt = ''
+
+    # Mined in block
+    viewtx_txt = _("Mined in block")
+    view_tx_lbl = QLabel(f'<span style="white-space:nowrap; font-size:11pt;">{ismine_txt}{viewtx_txt}: <a href="{info.txid}">{cashacct.num2bh(info.number)}</a></span>')
+    view_tx_lbl.setToolTip(_("View Registration Transaction"))
+    view_tx_lbl.linkActivated.connect(open_link)
+    grid.addWidget(view_tx_lbl, 2, 1, 1, 1, Qt.AlignTop | Qt.AlignRight)
+
+    grid.setRowStretch(2, 1)
+
+    # QR
+    tabs = QTabWidget()
+    full_addr_str = info.address.to_full_ui_string()
+    qr_address = QRCodeWidget(full_addr_str, fixedSize=True)
+    qr_address.setToolTip(full_addr_str)
+    tabs.addTab(qr_address, _("Address"))
+    qr_ca_string = QRCodeWidget(ca_string, fixedSize=True)
+    qr_ca_string.setToolTip(ca_string)
+    tabs.addTab(qr_ca_string, _("Cash Account"))
+    qr_address.setMinimumSize(300, 300)
+    qr_ca_string.setMinimumSize(300, 300)
+
+    grid.addWidget(tabs, 3, 0, 1, -1, Qt.AlignTop | Qt.AlignHCenter)
+
+    def_but = QPushButton()
+    mk_def_txt = _("Make default for address")
+    is_def_txt = _("Is default for address")
+    mk_def_tt = _("Make this Cash Account the default for this address")
+    is_def_tt = _("Cash Account has been made the default for this address")
+    def make_default():
+        wallet.cashacct.set_address_default(info)
+        parent.ca_address_default_changed_signal.emit(info)  # updates all concerned widgets, including self
+        tt = is_def_txt
+        QToolTip.showText(QCursor.pos(), tt, def_but)
+    def update_def_but(new_def):
+        if new_def and new_def.address != info.address:
+            # not related, abort
+            return
+        if new_def != info:
+            def_but.setDisabled(False)
+            def_but.setText(mk_def_txt)
+            def_but.setToolTip(mk_def_tt)
+        else:
+            def_but.setDisabled(True)
+            def_but.setText(is_def_txt)
+            def_but.setToolTip(is_def_tt)
+    def_but.clicked.connect(make_default)
+    infos = wallet.cashacct.get_cashaccounts([info.address])
+    def_now = infos and wallet.cashacct.get_address_default(infos)
+    if wallet.is_mine(info.address):
+        update_def_but(def_now)
+    else:
+        def_but.setHidden(True)  # not related to wallet, hide the button
+    del infos, def_now
+
+    # Bottom buttons
+    buttons = Buttons(def_but, OkButton(d))
+    grid.addLayout(buttons, 4, 0, -1, -1)
+
+
+    # make all labels allow select text & click links
+    for c in d.children():
+        if isinstance(c, QLabel):
+            c.setTextInteractionFlags(c.textInteractionFlags() | Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+
+    try:
+        parent.ca_address_default_changed_signal.connect(update_def_but)
+        d.exec_()
+    finally:
+        # Unconditionally detach slot to help along Python GC
+        try: parent.ca_address_default_changed_signal.disconnect(update_def_but)
+        except TypeError: pass
+
+    return True

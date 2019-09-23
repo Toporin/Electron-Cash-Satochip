@@ -18,8 +18,8 @@ with open('contrib/requirements/requirements-hw.txt') as f:
 
 version = imp.load_source('version', 'lib/version.py')
 
-if sys.version_info[:3] < (3, 5, 2):
-    sys.exit("Error: Electron Cash requires Python version >= 3.5.2...")
+if sys.version_info[:3] < (3, 6):
+    sys.exit("Error: Electron Cash requires Python version >= 3.6...")
 
 data_files = []
 
@@ -104,10 +104,18 @@ class MakeAllBeforeSdist(setuptools.command.sdist.sdist):
 
 platform_package_data = {}
 
-if sys.platform in ('linux', 'win32', 'cygwin'):
+if sys.platform in ('linux'):
     platform_package_data = {
         'electroncash_gui.qt' : [
-            'data/*.ttf'
+            'data/ecsupplemental_lnx.ttf',
+            'data/fonts.xml'
+        ],
+    }
+
+if sys.platform in ('win32', 'cygwin'):
+    platform_package_data = {
+        'electroncash_gui.qt' : [
+            'data/ecsupplemental_win.ttf'
         ],
     }
 
@@ -115,15 +123,17 @@ setup(
     cmdclass={
         'sdist': MakeAllBeforeSdist,
     },
-    name="Electron Cash",
-    version=version.PACKAGE_VERSION,
+    name=os.environ.get('EC_PACKAGE_NAME') or "Electron Cash",
+    version=os.environ.get('EC_PACKAGE_VERSION') or version.PACKAGE_VERSION,
     install_requires=requirements + ['pyqt5'],
     extras_require={
         'hardware': requirements_hw,
     },
     packages=[
         'electroncash',
+        'electroncash.locale',  # work-around for Android platform limitations
         'electroncash.qrreaders',
+        'electroncash.slp',
         'electroncash.utils',
         'electroncash_gui',
         'electroncash_gui.qt',
@@ -169,7 +179,7 @@ setup(
     scripts=['electron-cash'],
     data_files=data_files,
     description="Lightweight Bitcoin Cash Wallet",
-    author="Jonald Fyookball",
+    author="The Electron Cash Developers",
     author_email="jonf@electroncash.org",
     license="MIT Licence",
     url="http://electroncash.org",

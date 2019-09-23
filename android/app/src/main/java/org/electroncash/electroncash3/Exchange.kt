@@ -1,6 +1,6 @@
 package org.electroncash.electroncash3
 
-import android.arch.lifecycle.MediatorLiveData
+import androidx.lifecycle.MediatorLiveData
 
 
 val EXCHANGE_CALLBACKS = setOf("on_quotes", "on_history")
@@ -36,6 +36,14 @@ fun formatFiatAmountAndUnit(amount: Long): String? {
     }
 }
 
+fun formatSatoshisAndFiat(amount: Long): String {
+    var result = formatSatoshisAndUnit(amount)
+    val fiat = formatFiatAmountAndUnit(amount)
+    if (fiat != null) {
+        result += " ($fiat)"
+    }
+    return result
+}
 
 fun formatFiatAmount(amount: Long): String? {
     if (!fx.callAttr("is_enabled").toBoolean()) {

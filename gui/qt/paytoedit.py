@@ -36,14 +36,18 @@ from electroncash.address import Address, ScriptOutput
 from electroncash import networks
 from electroncash.util import PrintError
 from electroncash.contacts import Contact
+from electroncash import web
 
 from . import util
+from . import cashacctqt
 
 RE_ALIAS = r'^(.*?)\s*<\s*([0-9A-Za-z:]{26,})\s*>$'
 RE_COINTEXT = r'^\s*cointext:([-+() 0-9]+)\s*$'
+RE_AMT = r'^.*\s*,\s*([0-9,.]*)\s*$'
 
 RX_ALIAS = re.compile(RE_ALIAS)
 RX_COINTEXT = re.compile(RE_COINTEXT, re.I)
+RX_AMT = re.compile(RE_AMT)
 
 frozen_style = "PayToEdit { border:none;}"
 normal_style = "PayToEdit { }"
@@ -51,6 +55,8 @@ normal_style = "PayToEdit { }"
 class PayToEdit(PrintError, ScanQRTextEdit):
 
     def __init__(self, win):
+        from .main_window import ElectrumWindow
+        assert isinstance(win, ElectrumWindow) and win.amount_e and win.wallet
         ScanQRTextEdit.__init__(self)
         self.win = win
         self.amount_edit = win.amount_e
@@ -74,13 +80,15 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         self.outputs = []
         self.errors = []
         self.is_pr = False
-        self.is_alias = False
+        self.is_alias = self.validated = False
         self.scan_f = win.pay_to_URI
         self.update_size()
         self.payto_address = None
         self.cointext = None
+        self._ca_busy = False
 
         self.previous_payto = ''
+        self.preivous_ca_could_not_verify = set()
 
         if sys.platform in ('darwin',):
             # See issue #1411 -- on *some* macOS systems, clearing the
@@ -91,6 +99,8 @@ class PayToEdit(PrintError, ScanQRTextEdit):
             # and the workaround is simply to force a repaint using this trick
             # for all textChanged events. -Calin
             self.textChanged.connect(self.repaint)
+
+        self.verticalScrollBar().valueChanged.connect(self._vertical_scroll_bar_changed)
 
     def setFrozen(self, b):
         self.setReadOnly(b)
@@ -151,7 +161,8 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         self.cointext = None
         if len(lines) == 1:
             data = lines[0]
-            if data.lower().startswith(networks.net.CASHADDR_PREFIX + ":"):
+            lc_data = data.lower()
+            if any(lc_data.startswith(scheme + ":") for scheme in web.parseable_schemes()):
                 self.scan_f(data)
                 return
             try:
@@ -235,6 +246,14 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         # The scrollbar visibility can have changed so we update the overlay position here
         self._updateOverlayPos()
 
+    def _vertical_scroll_bar_changed(self, value):
+        ''' Fix for bug #1521 -- Contents of payto edit can disappear
+        unexpectedly when selecting with mouse on a single-liner. '''
+        vb = self.verticalScrollBar()
+        docLineCount = self.document().lineCount()
+        if docLineCount == 1 and vb.maximum()-vb.minimum() == 1 and value != vb.minimum():
+            self.print_error(f"Workaround #1521: forcing scrollbar value back to {vb.minimum()} for single line payto_e.")
+            vb.setValue(vb.minimum())
 
     def setCompleter(self, completer):
         self.c = completer
@@ -247,21 +266,23 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         if self.c.widget() != self:
             return
         tc = self.textCursor()
-        extra = len(completion) - len(self.c.completionPrefix())
-        tc.movePosition(QTextCursor.Left)
-        tc.movePosition(QTextCursor.EndOfWord)
-        tc.insertText(completion[-extra:])
+        # new! because of the way Cash Accounts works we must delete the whole
+        # line under cursor and insert the full completion. This ends up
+        # working reasonably well.
+        tc.select(QTextCursor.LineUnderCursor)
+        tc.removeSelectedText()
+        tc.insertText(completion + " ")
         self.setTextCursor(tc)
 
 
     def textUnderCursor(self):
         tc = self.textCursor()
-        tc.select(QTextCursor.WordUnderCursor)
+        tc.select(QTextCursor.LineUnderCursor)
         return tc.selectedText()
 
-
     def keyPressEvent(self, e):
-        if self.isReadOnly():
+        if self.isReadOnly() or not self.hasFocus():
+            e.ignore()
             return
 
         if self.c.popup().isVisible():
@@ -269,7 +290,7 @@ class PayToEdit(PrintError, ScanQRTextEdit):
                 e.ignore()
                 return
 
-        if e.key() in [Qt.Key_Tab]:
+        if e.key() in [Qt.Key_Tab, Qt.Key_Backtab]:
             e.ignore()
             return
 
@@ -277,17 +298,16 @@ class PayToEdit(PrintError, ScanQRTextEdit):
             e.ignore()
             return
 
-        QPlainTextEdit.keyPressEvent(self, e)
+        super().keyPressEvent(e)
 
         ctrlOrShift = e.modifiers() and (Qt.ControlModifier or Qt.ShiftModifier)
         if self.c is None or (ctrlOrShift and not e.text()):
             return
 
-        eow = "~!@#$%^&*()_+{}|:\"<>?,./;'[]\\-="
         hasModifier = (e.modifiers() != Qt.NoModifier) and not ctrlOrShift
         completionPrefix = self.textUnderCursor()
 
-        if hasModifier or not e.text() or len(completionPrefix) < 1 or eow.find(e.text()[-1]) >= 0:
+        if hasModifier or not e.text() or len(completionPrefix) < 1:
             self.c.popup().hide()
             return
 
@@ -306,8 +326,9 @@ class PayToEdit(PrintError, ScanQRTextEdit):
                 # TODO: update fee
         super(PayToEdit,self).qr_input(_on_qr_success)
 
-    def resolve(self):
-        self.is_alias = False
+    def _resolve_open_alias(self):
+        prev_vals = self.is_alias, self.validated  # used only if early return due to unchanged text below
+        self.is_alias, self.validated = False, False
         if self.hasFocus():
             return
         if self.is_multiline():  # only supports single line entries atm
@@ -317,9 +338,12 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         key = str(self.toPlainText())
         key = key.strip()  # strip whitespaces
         if key == self.previous_payto:
-            return
+            # unchanged, restore previous state, abort early.
+            self.is_alias, self.validated = prev_vals
+            return self.is_alias
         self.previous_payto = key
-        if not (('.' in key) and (not '<' in key) and (not ' ' in key)):
+        if '.' not in key or '<' in key or ' ' in key:
+            # not an openalias or an openalias with extra info in it, bail..!
             return
         parts = key.split(sep=',')  # assuming single line
         if parts and len(parts) > 0 and Address.is_valid(parts[0]):
@@ -331,10 +355,13 @@ class PayToEdit(PrintError, ScanQRTextEdit):
             return
         if not data:
             return
-        self.is_alias = True
 
         address = data.get('address')
         name = data.get('name')
+        _type = data.get('type')
+
+        if _type != 'openalias':
+            return
 
         address_str = None
         if isinstance(address, str):
@@ -344,19 +371,136 @@ class PayToEdit(PrintError, ScanQRTextEdit):
         else:
             raise RuntimeError('unknown address type')
 
+        self.is_alias = True
+
         new_url = key + ' <' + address_str + '>'
         self.setText(new_url)
         self.previous_payto = new_url
 
         self.win.contacts.add(Contact(name=name, address=key, type='openalias'), unique=True)
-        self.win.contact_list.on_update()
+        self.win.contact_list.update()
 
         self.setFrozen(True)
-        if data.get('type') == 'openalias':
-            self.validated = data.get('validated')
-            if self.validated:
-                self.setGreen()
-            else:
-                self.setExpired()
+
+        self.validated = bool(data.get('validated'))
+        if self.validated:
+            self.setGreen()
         else:
-            self.validated = None
+            self.setExpired()
+
+        return True
+
+    def _resolve_cash_accounts(self, skip_verif=False):
+        ''' This should be called if not hasFocus(). Will run through the
+        text in the payto and rewrite any verified cash accounts we find. '''
+        wallet = self.win.wallet
+        lines = self.lines()
+        lines_orig = lines.copy()
+        need_verif = set()
+        for n, line in enumerate(lines):
+            parts = line.split(maxsplit=1)
+            if not parts:
+                # nothing there..
+                continue
+            ca_string = parts[0]
+            while ca_string.endswith(','):
+                # string trailing ',', if any
+                ca_string = ca_string[:-1]
+                parts.insert(1, ',') # push stripped ',' into the 'parts' list
+            ca_tup = wallet.cashacct.parse_string(ca_string)
+            if not ca_tup:
+                # not a cashaccount
+                continue
+            # strip the '<' piece... in case user edited and stale <address> is present
+            m = RX_AMT.match(line)
+            if m:
+                parts = [ca_string, ',', m.group(1)]  # strip down to just ca_string + , + amount
+            else:
+                parts = [ca_string]  # strip down to JUST ca_string
+            ca_info = wallet.cashacct.get_verified(ca_string)
+            if ca_info:
+                resolved = wallet.cashacct.fmt_info(ca_info) + " " + ca_info.emoji + " <" + ca_info.address.to_ui_string() + ">"
+                lines[n] = line = resolved + " ".join(parts[1:])  # rewrite line, putting the resolved cash account + <address> at the beginning, amount at the end (if any)
+            else:
+                lines[n] = line = " ".join(parts)  # rewrite line, possibly stripping <> address here
+                # user specified cash account not found.. potentially kick off verify
+                need_verif.add(ca_tup[1])
+        if (need_verif and not skip_verif
+                and need_verif != self.preivous_ca_could_not_verify  # this makes it so we don't keep retrying when verif fails due to bad cashacct spec
+                and wallet.network and wallet.network.is_connected()):
+            # Note: verify_multiple_blocks here throws up a waiting dialog
+            # and spawns a local event loop, so this call path may block for
+            # up to 10 seconds. The waiting dialog is however cancellable with
+            # the ESC key, so it's not too bad UX-wise. Just bear in mind that
+            # the local event loop can cause this code path to execute again
+            # if not careful (see the self._ca_busy flag documented inside
+            # function `resolve` below).
+            res = cashacctqt.verify_multiple_blocks(list(need_verif), self.win, wallet)
+            if res is None:
+                # user abort
+                return
+            elif res > 0:
+                # got some verifications...
+                # call self again, to redo the payto edit with the verified pieces
+                self._resolve_cash_accounts(skip_verif=True)
+                return # above call takes care of rewriting self, so just return early
+
+        self.preivous_ca_could_not_verify = need_verif
+
+        if lines_orig != lines:
+            # set text only if we changed something since setText kicks off more
+            # parsing elsewehre in this class on textChanged
+            self.setText('\n'.join(lines))
+
+
+    def resolve(self):
+        ''' This is called by the main window periodically from a timer. See
+        main_window.py function `timer_actions`.
+
+        It will resolve OpenAliases in the send tab and will also alternatively
+        resolve Cash Accounts by attempting to verify them in the background
+        and rewriting the payto field with completed information.
+
+        Note that OpenAlias is assumed to be a single-line payto. Also note
+        that OpenAlias blocks the GUI thread whereas Cash Accounts does this
+        by throwing up a WaitingDialog (which may be aborted/cancelled and
+        doesn't lock the UI event loop).
+
+        TODO/FIXME: Make OpenAlias also use a Waiting Dialog
+
+        Cash Accounts supports full multiline with mixed address/cash accounts
+        in the payto lines.
+
+        OpenAlias and other payto types are mutually exclusive (that is, if
+        OpenAlias, you are such with 1 payee which is OpenAlias, and cannot
+        mix with regular and/or Cash Accounts).
+
+        Note that this mechanism was piggy-backed onto code we inherited from
+        Electrum.  It's my opinion that this mechanism is a bit complex for what
+        it is since it requires the progremmer to spend considerable time
+        reading this code to modfy/enhance it.  But we will work with that
+        we have for now. -Calin '''
+        if self._ca_busy:
+            # See the comment at the end of this function about why this flag is
+            # here.
+            return
+        if self._resolve_open_alias():
+            # it was an openalias -- abort and don't proceed to cash account
+            # resolve
+            return
+        if self.hasFocus() or self.is_pr:
+            # PR by definition can't proceed, and we also don't proceed if
+            # user is still editing.
+            return
+
+        # self._ca_busy is a reentrancy prevention flag, needed because
+        # _resolve_cash_acconts causes a local event loop to happen in some
+        # cases as it resolves cash accounts by throwing up a WaitingDialog,
+        # which may cause the timer that calls this function to fire again.
+        # The below mechanism prevents that situation as it may lead to
+        # multiple "Verifying, please wait... " dialogs on top of each other.
+        try:
+            self._ca_busy = True
+            self._resolve_cash_accounts()
+        finally:
+            self._ca_busy = False

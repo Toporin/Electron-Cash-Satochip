@@ -576,6 +576,46 @@ and there is no warning message.
 
 # Release 4.0.8
 
+* Cash Accounts support has been added to Electron Cash!  Most of the UI for it
+  is in the "Contacts" tab (View -> Show Contacts), there are also UI bits to it
+  in the Addresses tab, in the Tools menu, and of course, the Send tab (where
+  you can enter any Cash Account and it will get auto-resolved for you!)
+  #1505 (cculianu with massive platform work from Axel Gembe)
+* Fixups to allow Digital Bitbox and Ledger to sign more types of OP_RETURN
+  outputs. (imaginaryusername, Axel Gembe, cculianu)
+* "Button" Editor: Fix keypress events going to the editor when the buttons are
+  focused and other nits. #1518 (Axel Gembe)
+* More help for "QtSvg Missing" error; #1516 (Mark Lundeberg)
+* Qt: Performance fix to History tab for wallets with many txs when verifying.
+  The performance when verifying for wallets with a huge history was not optimal
+  and the UI would periodically hang. This has been fixed. (cculianu)
+* SPV: Make the merkle node checker no longer care whether "inner node looks
+  like a tx" because this check is no longer need after the Nov. 2018 hard-fork.
+  (cculianu, Mark Lundeberg)
+* Fix #1502 - Intermittent iOS Crash Reporter on bad/expired BIP70 Payment
+  (cculianu)
+* Translations: Add support for plural forms #1500 (Axel Gembe)
+* Coins Tab: Added default sort order of Amount, Descending. The Coins tab now
+  also remebers whatever sort order you gave it. This should be good for
+  CashShuffle users with many coins in their coins tab. (cculianu)
+* Wallet: Improve performance of is_mine() check from O(N) to O(logN) (cculianu)
+* Qt Network Dialog: Let the user edit the host/port in peace (SomberNight,
+  cculianu)
+* Fonts: Improve color emoji support on Windows and Linux #1498 (Axel Gembe)
+* Fonts: Add Google Noto Color Emoji font subset #1496, #1523 - This is bundled
+  in Windows and AppImage and loaded at runtime if the user lacks a suitable
+  color emoji font (Axel Gembe).
+* AppImage: Bundle more binaries to increase compatibility & other fixes #1492
+  (Axel Gembe)
+* Updated "Error, Could not import PyQt5" message to be more helpful (cculianu)
+* Qt: Update to 5.12.3 for Windows and AppImage builds #1490 (Axel Gembe)
+* Linux Qt: Warn user if running Qt < 5.12 (this has terrible font support
+  which causes EC to render fonts badly if using emojis or unicode) (cculianu)
+* AppImage: Upgrade to Ubuntu 16.04 as base #1489 (Axel Gembe)
+* Build: Protect against PGP keyserver poisoning attack #1487 (Axel Gembe)
+* Added electroncash.se server to servers.json (Georg Engelman)
+* TxDialog: Allow various fields to be selected by mouse. (cculianu)
+* TxDialog: Added the "Mined in block" field to the dialog. (cculianu)
 * Localization: The app now defaults to the system language on Windows, Mac and
   generic Unix for new installs.  The preferences dialog has also been improved
   to bring the General tab to the front and make the language picker contain
@@ -589,3 +629,121 @@ and there is no warning message.
   address mode. (cculianu)
 * Ledger: Fix #1479: 2FA Dialog with Legacy devices and multiple outputs was
   crashy due to a small programming error. Fixed. (Axel Gembe)
+* Added various hotkeys to the GUI Ctrl+K, Ctrl+M, etc. You will see them in
+  the various in-app menus (such as Tools, Wallet, etc). (cculianu)
+* Made the network layer more resilient to malformed server responses.
+  (cculianu)
+* Search box has been fixed to not get crushed by the balance label and to also
+  work better and have placeholder text. Closes #1493 (cculianu)
+* Coins tab: Offer alternate address format copy (eg "Copy Legacy Address" if
+  in CashAddr mode, and vice versa). This was already available in the Addresses
+  tab but wasn't in the Coins tab. Closes #1476 (cculianu)
+* Address tab: Allow multi-select and copy of data items such as Addresses,
+  Address & Balance, etc. Closes #1475 (cculianu)
+* Contacts tab: All contacts can now also get an optional label. The label is
+  keyed off the address and is saved in wallet.labels. Closes #1508 (cculianu)
+* Added better help for the Pay to edit in the send tab. The help text has been
+  improved to clarify this advanced widget's capabilities, and a '?' help button
+  has been added in the tool buttons for the line edit. (cculianu)
+* App icon has been updated to be a little more rectangular and render better
+  across resolutions and platforms. #1526 (cculianu, Axel Gembe, fyoookball,
+  BeltranLeo)
+* Update checker: Use a longer timeout to not time out when using a proxy
+  server. #1509 (cculianu)
+* External Plugins: Be more resilient to a bad plugin file. #1533 (cculianu)
+* Updated translations (Axel Gembe)
+* Email plugin crash fix #1534 (cculianu)
+* Minor UI bugfixes. (Axel Gembe, cculianu)
+
+# Release 4.0.9
+
+* Fixed remaining (rare, hopefully) font & emoji rendering issues on some Linux
+  distributions. (Axel Gembe)
+* Added preferences options for "Use FreeType" (Windows) and "fontconfig
+  overrides" (Linux).  (cculianu)
+* Updated blockchain checkpoint to block 592911. (Malcolm Smith)
+* Added support for "cashacct:" URIs #1547. You can paste these in the Pay-to
+  edit in the Send tab or, if on Linux, Mac & Windows, click on a cashacct:
+  link in your browser as well. (cculianu)
+* Fixed esoteric crash bug which would occur sometimes when opening the
+  preferences dialog. This bug was due to bugs in PyQt5 when using QtMultimedia
+  and the fix involved loading QtMultimedia at app start, rather than on-demand.
+  #1545 (cculianu)
+* Fix #1552: Disallow "Request payment" in addresses tab when address is used.
+  This would lead to an inconsistent UI; the receive tab would always enforce a
+  new address anyway, so the option in the right-click menu was misleading at
+  best in that situation.  "Request payment" works as normal if the address is
+  unused, however. (cculianu)
+* Fixed Windows setup.exe to be more reproducible and other misc build fixes.
+  (Axel Gembe, cculianu)
+* Fixed very rare uncaught exception due to misbehaving plugin #1554. (cculianu)
+* KeepKey & Trezor: Fix WebUSB on Windows 10 1903 by patching libusb, #1556.
+  (Axel Gembe)
+* Cash Accounts: Lookup/Search results offer a "Details..." link now instead
+  of the "View tx..." link. You can view tx on the details page. (cculianu)
+* Qt: Added proper keyboard navigation to the Transaction Dialog window, and
+  various other places. #1557 (Axel Gembe)
+* Android: Added native libsecp256k1 support (Malcolm Smith)
+* Bugfix #1240, #892, #1484: Prevent infinite startup hangs due to lockfile
+  timestamp in the future. (cculianu)
+* Email Plugin: Minor fixups and fixed bug #924. (cculianu)
+* iOS: Fix #1273 -- Crash due to trying to pass a Python Exception to obj-c as
+  string. (cculianu)
+* Various build and packaging fixes for Windows. (Axel Gembe)
+* Added BitPay 2.0 JSON API support. (cculianu)
+* Fixup to some plugins such as Scheduled Payments and Inter-Wallet-Transfer
+  raising uncaught exceptions if they are loaded and enabled and user hits
+  Ctrl+F (cculianu).
+* LabelSync: Prevent error dialog spam when labels plugin fails to update
+  labels on the server. (cculianu)
+
+# Release 4.0.10
+
+* Lib & Qt: Added Bip38Key encryption support to both the library for plugins
+  to use as well as to the Qt UI for users to be able to export or encrypt WIF
+  keys as BIP38 encrypted keys; #1593, #1594. (cculianu)
+* Minor internal i18n nits, #1571. (Mark Lundeberg)
+* Windows: Switch LibUSB to version 1.0.23-rc2, #1572. (Axel Gembe)
+* iOS: Added native secp256k1 to iOS build, drastically improving signing speed.
+  (cculianu)
+* iOS: Added Schnorr signatures. (cculianu)
+* Fixed output script classifaction code to be more correct. (Mark Lundeberg)
+* Qt: Made generated QR codes look better on HighDPI displays. (cculianu,
+  zebra-lucky)
+* Misc. localization and internationalization fixups. (Axel Gembe)
+* OSX: Minor fixup for Mojave font weights being rendered too thick. (cculianu)
+* Minor bugfix: Guard against "all zero" transactions coming from malicious
+  servers, #987. (cculianu)
+* Qt Console: Fixed the warning box layout to fit on-screen in all setups,
+  #1584. (Axel Gembe)
+* Qt: Fixed minor warning about alpha value, #1585. (proteanx)
+* OSX & Linux AppImage: Bumped bundled Python version to 3.6.9. (cculianu)
+* iOS: Added a ruby helper script which, if running Brew, will auto-set-up
+  more of the Xcode project for the user after creating it with
+  `make_ios_project.sh`. (jonspock)
+* Added SLP awareness to all wallets. Even though one can't easily get an SLP
+  token into a non-SLP wallet, it is still possible. The EC internals now
+  track transactions containing SLP tokens and guard against spending such
+  coins. Coins that have SLP tokens on them are highlighted in green in the
+  "Coins" tab and cannot be spent from the UI.  This is to prevent token
+  burn, #1602 (cculianu)
+* Android build fixes, #1599. (mhsmith)
+* More Android fixes: Added stability improvements and various corner
+  case bugfixes (see github PR #1605 for details). (mhsmith)
+* Fiat FX Rate: Bitpay.com URL / API endpoint has changed, thus breaking fiat
+  exchange rate sources if "Bitpay" was selected. Fixed. (cculianu)
+* Updated websockets (electrum-merchant): fixed stale/old code which no longer
+  ran, added '--payment_url' option, and other miscellany. (cculianu)
+* Implemented BIP70 properly on Qt and iOS; #1612. (cculianu)
+* MacOS HW Wallets: Fixed SIGSEGV crash due to talking to the device from
+  multiple threads which is not supported on Darwin. (cculianu)
+* Ledger Nano HW support has been vastly improved: It should be less crashy
+  and provide the user with much more meaningful messages for getting the device
+  into the proper state to talk to Electron Cash. (cculianu)
+* Wallet: Fixed erroneous coinbase maturity logic. Immature mined coins were
+  erroneously being withheld from spending for an extra confirmation. (cculianu)
+* Coins tab: Coinbase coins that are not mature are now highlighted in blue
+  text and are not allowed to be selected for individual coin spending
+  (previously you could select them for spending with no way to actually spend
+  them which was bad UX). (cculianu)
+* TxDialog: coinbase tx's now show 0 fee, rather than 'unknown' (cculianu)

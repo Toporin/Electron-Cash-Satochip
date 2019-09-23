@@ -19,19 +19,27 @@ RUN filename=sdk-tools-linux-4333796.zip && \
 # the build process will automatically download it.
 RUN yes | android-sdk/tools/bin/sdkmanager "platforms;android-28"
 
-# make_locale
+# Python 3.6 isn't included in this version of Debian, so use a third-party build.
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip && \
-    pip3 install requests
+    wget https://github.com/chriskuehl/python3.6-debian-stretch/releases/download/v3.6.3-1-deb9u1/{python3.6,python3.6-minimal,libpython3.6,libpython3.6-minimal,libpython3.6-stdlib}_3.6.3-1.deb9u1_amd64.deb && \
+    apt install -y ./*.deb && \
+    rm *.deb && \
+    ln -s python3.6 /usr/bin/python3
+
+# For generate_strings.py.
+RUN wget -O - https://bootstrap.pypa.io/get-pip.py | python3.6 && \
+    pip3 install polib requests
 COPY contrib/make_locale contrib/
 COPY gui gui
 COPY ios/ElectronCash/electroncash_gui/ios_native ios/ElectronCash/electroncash_gui/ios_native
 COPY plugins plugins
 
-# The app itself
+# The app itself. Specifically check for the keystore, otherwise it'll build an APK with no
+# certificates.
 COPY android android
+COPY android/keystore.jks android/
 COPY contrib/deterministic-build contrib/deterministic-build
 COPY lib lib
 
 RUN echo "sdk.dir=$(pwd)/android-sdk" > android/local.properties
-RUN cd android && ./gradlew app:assembleRelease
+RUN cd android && ./gradlew app:assembleMainNetRelease

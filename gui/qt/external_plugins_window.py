@@ -49,6 +49,7 @@ INSTALL_ERROR_MESSAGES = {
     ExternalPluginCodes.INVALID_MAMIFEST_VERSION: _("The plugin manifest lacks a valid version."),
     ExternalPluginCodes.INVALID_MAMIFEST_MINIMUM_EC_VERSION: _("The plugin manifest lacks a valid minimum Electron Cash version."),
     ExternalPluginCodes.INVALID_MAMIFEST_PACKAGE_NAME: _("The plugin manifest lacks a valid package name."),
+    ExternalPluginCodes.UNSPECIFIED_ERROR: _("An unspecified exception was raised. Cannot open plugin.")
 }
 
 
@@ -253,7 +254,7 @@ class ExternalPluginsDialog(WindowModalDialog, MessageBoxMixin):
         self.main_window = parent
         self.config = parent.config
         self.setMinimumWidth(600)
-        self.setMaximumWidth(600)
+        #self.setMaximumWidth(600)
 
         vbox = QVBoxLayout(self)
 
@@ -404,11 +405,10 @@ class ExternalPluginTable(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSortingEnabled(False)
 
-        self.horizontalHeader().setStretchLastSection(True)
         verticalHeader = self.verticalHeader()
         verticalHeader.setVisible(False)
-        verticalHeader.setSectionResizeMode(QHeaderView.Fixed)
-        verticalHeader.setDefaultSectionSize(80)
+        verticalHeader.setSectionResizeMode(QHeaderView.Fixed)  # FIXME: won't look good on all platforms with all fonts
+        verticalHeader.setDefaultSectionSize(80)  # FIXME: won't look good on all platforms with all fonts
         self.setStyleSheet("QTableWidget::item { padding: 10px; }")
 
         self.itemSelectionChanged.connect(self.on_item_selection_changed)
@@ -473,6 +473,12 @@ class ExternalPluginTable(QTableWidget):
         self.setColumnWidth(2, 60)
         self.setColumnWidth(3, 60)
         self.setHorizontalHeaderLabels([_("Name"), _("Description"), _("Version"), _("Enabled")])
+        header = self.horizontalHeader()
+        header.setStretchLastSection(False)
+        for col in range(header.count()):
+            sm = QHeaderView.Stretch if col == 1 else QHeaderView.ResizeToContents  # description field is the stretch column, others are resized to contents
+            header.setSectionResizeMode(col, sm)
+        del header
 
         self.row_keys = []
         for row_index, (package_name, metadata) in enumerate(plugin_manager.external_plugin_metadata.items()):

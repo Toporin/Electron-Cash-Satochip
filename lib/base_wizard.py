@@ -26,15 +26,17 @@
 
 import os
 import sys
+import traceback
 from . import bitcoin
 from . import keystore
+from . import util
 from .keystore import bip44_derivation, bip44_derivation_145
 from .wallet import (ImportedAddressWallet, ImportedPrivkeyWallet,
                      Standard_Wallet, Multisig_Wallet, wallet_types)
 from .i18n import _
 
 
-class BaseWizard(object):
+class BaseWizard(util.PrintError):
 
     def __init__(self, config, storage):
         super(BaseWizard, self).__init__()
@@ -161,6 +163,7 @@ class BaseWizard(object):
             self.wallet = ImportedPrivkeyWallet.from_text(self.storage, text,
                                                           None)
             self.keystores = self.wallet.get_keystores()
+            self.stack = []  # 'Back' button wasn't working anyway at this point, so we just force it to read 'Cancel' and this proceeds with no password set.
             self.request_password(run_next=self.on_password)
         self.terminate()
 
@@ -246,8 +249,8 @@ class BaseWizard(object):
             self.plugin.setup_device(device_info, self)
         except OSError as e:
             self.show_error(_('We encountered an error while connecting to your device:')
-                            + '\n' + str(e) + '\n'
-                            + _('To try to fix this, we will now re-pair with your device.') + '\n'
+                            + '\n\n"' + str(e) + '"\n\n'
+                            + _('To try to fix this, we will now re-pair with your device.') + ' '
                             + _('Please try again.'))
             devmgr = self.plugins.device_manager
             devmgr.unpair_id(device_info.device.id_)
@@ -256,6 +259,7 @@ class BaseWizard(object):
         except BaseException as e:
             if str(e).strip():
                 # This prevents showing an empty "UserCancelled" message
+                self.print_error(traceback.format_exc())
                 self.show_error(str(e))
             self.choose_hw_device()
             return
@@ -284,7 +288,8 @@ class BaseWizard(object):
         try:
             xpub = self.plugin.get_xpub(device_info.device.id_, derivation, xtype, self)
         except BaseException as e:
-            self.show_error(e)
+            self.print_error(traceback.format_exc())
+            self.show_error(str(e))
             return
         d = {
             'type': 'hardware',
@@ -379,6 +384,7 @@ class BaseWizard(object):
 
     def create_wallet(self):
         if any(k.may_have_password() for k in self.keystores):
+            self.stack = []  # 'Back' button wasn't working anyway at this point, so we just force it to read 'Cancel' and quit the wizard by doing this.
             self.request_password(run_next=self.on_password)
         else:
             self.on_password(None, False)

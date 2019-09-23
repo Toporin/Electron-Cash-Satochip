@@ -27,6 +27,7 @@ import sys
 import copy
 import datetime
 import json
+import time
 
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
@@ -63,6 +64,8 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
     throttled_update_sig = pyqtSignal()  # connected to self.throttled_update -- emit from thread to do update in main thread
     dl_done_sig = pyqtSignal()  # connected to an inner function to get a callback in main thread upon dl completion
 
+    BROADCAST_COOLDOWN_SECS = 5.0
+
     def __init__(self, tx, parent, desc, prompt_if_unsaved):
         '''Transactions in the wallet will show their description.
         Pass desc to give a description for txs not yet in the wallet.
@@ -82,9 +85,10 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         self.cashaddr_signal_slots = []
         self._dl_pct = None
         self._closed = False
-        self.tx_hash = self.tx._txid(self.tx.raw) if self.tx.raw else None
+        self.tx_hash = self.tx.txid_fast() if self.tx.raw and self.tx.is_complete() else None
         self.tx_height = self.wallet.get_tx_height(self.tx_hash)[0] or None
         self.block_hash = None
+        Weak.finalization_print_error(self)  # track object lifecycle
 
         self.setMinimumWidth(750)
         self.setWindowTitle(_("Transaction"))
@@ -92,11 +96,13 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         vbox = QVBoxLayout()
         self.setLayout(vbox)
 
-        vbox.addWidget(QLabel(_("Transaction ID:")))
         self.tx_hash_e  = ButtonsLineEdit()
+        l = QLabel(_("&Transaction ID:"))
+        l.setBuddy(self.tx_hash_e)
+        vbox.addWidget(l)
         self.tx_hash_e.addCopyButton()
         weakSelfRef = Weak.ref(self)
-        qr_show = lambda: weakSelfRef() and weakSelfRef().main_window.show_qrcode(str(weakSelfRef().tx_hash_e.text()), 'Transaction ID', parent=weakSelfRef())
+        qr_show = lambda: weakSelfRef() and weakSelfRef().main_window.show_qrcode(str(weakSelfRef().tx_hash_e.text()), _("Transaction ID"), parent=weakSelfRef())
         icon = ":icons/qrcode_white.svg" if ColorScheme.dark_scheme else ":icons/qrcode.svg"
         self.tx_hash_e.addButton(icon, qr_show, _("Show as QR code"))
         self.tx_hash_e.setReadOnly(True)
@@ -134,22 +140,22 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
 
         self.add_io(vbox)
 
-        self.sign_button = b = QPushButton(_("Sign"))
+        self.sign_button = b = QPushButton(_("&Sign"))
         b.clicked.connect(self.sign)
 
-        self.broadcast_button = b = QPushButton(_("Broadcast"))
+        self.broadcast_button = b = QPushButton(_("&Broadcast"))
         b.clicked.connect(self.do_broadcast)
+        self.last_broadcast_time = 0
 
-        self.save_button = b = QPushButton(_("Save"))
+        self.save_button = b = QPushButton(_("S&ave"))
         b.clicked.connect(self.save)
 
-        self.cancel_button = b = QPushButton(_("Close"))
-        b.clicked.connect(self.close)
-        b.setDefault(True)
+        self.cancel_button = b = CloseButton(self)
 
         self.qr_button = b = QPushButton()
         b.setIcon(QIcon(icon))
         b.clicked.connect(self.show_qr)
+        b.setShortcut(QKeySequence(Qt.ALT + Qt.Key_Q))
 
         self.copy_button = CopyButton(lambda: str(weakSelfRef() and weakSelfRef().tx),
                                       callback=lambda: weakSelfRef() and weakSelfRef().show_message(_("Transaction raw hex copied to clipboard.")))
@@ -231,9 +237,16 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
             self.update()
 
     def do_broadcast(self):
+        def broadcast_done(success):
+            if success:
+                # 5 second cooldown period on broadcast_button after successful
+                # broadcast
+                self.last_broadcast_time = time.time()
+                self.update()  # disables the broadcast button if last_broadcast_time is < BROADCAST_COOLDOWN_SECS seconds ago
+                QTimer.singleShot(self.BROADCAST_COOLDOWN_SECS*1e3+100, self.update)  # broadcast button will re-enable if we got nothing from server and >= BROADCAST_COOLDOWN_SECS elapsed
         self.main_window.push_top_level_window(self)
         try:
-            self.main_window.broadcast_transaction(self.tx, self.desc)
+            self.main_window.broadcast_transaction(self.tx, self.desc, callback=broadcast_done)
         finally:
             self.main_window.pop_top_level_window(self)
         self.saved = True
@@ -244,7 +257,10 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
             and not self.question(_('This transaction is not saved. Close anyway?'), title=_("Warning"))):
             event.ignore()
         else:
+            super().closeEvent(event)
             event.accept()
+            if self._closed:
+                return
             self._closed = True
             self.tx.fetch_cancel()
             parent = self.main_window
@@ -337,6 +353,9 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         return fee
 
     def update(self):
+        if self._closed:
+            # latent timer fire
+            return
         desc = self.desc
         base_unit = self.main_window.base_unit()
         format_amount = self.main_window.format_amount
@@ -345,7 +364,20 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         self.tx_hash = tx_hash
         desc = label or desc
         size = self.tx.estimated_size()
-        self.broadcast_button.setEnabled(can_broadcast)
+
+        # We enable the broadcast button IFF both of the following hold:
+        # 1. can_broadcast is true (tx has not been seen yet on the network
+        #    and is_complete).
+        # 2. The last time user hit "Broadcast" (and it was successful) was
+        #    more than BROADCAST_COOLDOWN_SECS ago. This second condition
+        #    implements a broadcast cooldown timer which immediately disables
+        #    the "Broadcast" button for a time after a successful broadcast.
+        #    This prevents the user from being able to spam the broadcast
+        #    button. See #1483.
+        self.broadcast_button.setEnabled(can_broadcast
+                                         and time.time() - self.last_broadcast_time
+                                                >= self.BROADCAST_COOLDOWN_SECS)
+
         can_sign = not self.tx.is_complete() and \
             (self.wallet.can_sign(self.tx) or bool(self.main_window.tx_external_keypairs))
         self.sign_button.setEnabled(can_sign)
@@ -358,7 +390,7 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
             self.tx_desc.setText(_("Description") + ': ' + desc)
             self.tx_desc.show()
 
-        if self.tx_height and tx_hash:
+        if self.tx_height is not None and self.tx_height > 0 and tx_hash:
             status_extra = '&nbsp;&nbsp;( ' + _("Mined in block") + f': <a href="tx:{tx_hash}">{self.tx_height}</a>' + ' )'
         else:
             status_extra = ''
@@ -415,20 +447,23 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
 
     def add_io(self, vbox):
         if self.tx.locktime > 0:
-            vbox.addWidget(QLabel("LockTime: %d\n" % self.tx.locktime))
+            lbl = QLabel(_("LockTime: {lock_time}").format(lock_time=self.tx.locktime))
+            lbl.setTextInteractionFlags(lbl.textInteractionFlags() | Qt.TextSelectableByMouse)
+            vbox.addWidget(lbl)
 
         hbox = QHBoxLayout()
-        hbox.setContentsMargins(0,0,0,0)
+        hbox.setContentsMargins(0,12,0,0)
 
+        self.i_text = i_text = TextBrowserKeyboardFocusFilter()
         num_inputs = len(self.tx.inputs())
-        inputs_lbl_text = ngettext("Input", "Inputs ({num_inputs})", num_inputs)
-        if num_inputs > 1:
-            inputs_lbl_text = inputs_lbl_text.format(num_inputs=num_inputs)
-        hbox.addWidget(QLabel(inputs_lbl_text))
+        inputs_lbl_text = ngettext("&Input", "&Inputs ({num_inputs})", num_inputs).format(num_inputs=num_inputs)
+        l = QLabel(inputs_lbl_text)
+        l.setBuddy(i_text)
+        hbox.addWidget(l)
 
 
         hbox.addSpacerItem(QSpacerItem(20, 0))  # 20 px padding
-        self.dl_input_chk = chk = QCheckBox(_("Download input data"))
+        self.dl_input_chk = chk = QCheckBox(_("&Download input data"))
         chk.setChecked(self.is_fetch_input_data())
         chk.clicked.connect(self.set_fetch_input_data)
         hbox.addWidget(chk)
@@ -447,7 +482,6 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
 
         vbox.addLayout(hbox)
 
-        self.i_text = i_text = QTextBrowser()
         i_text.setOpenLinks(False)  # disable automatic link opening
         i_text.anchorClicked.connect(self._open_internal_link)  # send links to our handler
         self.i_text_has_selection = False
@@ -466,11 +500,12 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         hbox.setContentsMargins(0,0,0,0)
         vbox.addLayout(hbox)
 
+        self.o_text = o_text = TextBrowserKeyboardFocusFilter()
         num_outputs = len(self.tx.outputs())
-        outputs_lbl_text = ngettext("Output", "Outputs ({num_outputs})", num_outputs)
-        if num_outputs > 1:
-            outputs_lbl_text = outputs_lbl_text.format(num_outputs=num_outputs)
-        hbox.addWidget(QLabel(outputs_lbl_text))
+        outputs_lbl_text = ngettext("&Output", "&Outputs ({num_outputs})", num_outputs).format(num_outputs=num_outputs)
+        l = QLabel(outputs_lbl_text)
+        l.setBuddy(o_text)
+        hbox.addWidget(l)
 
         box_char = "█"
         self.recv_legend = QLabel("<font color=" + ColorScheme.GREEN.as_color(background=True).name() + ">" + box_char + "</font> = " + _("Receiving Address"))
@@ -484,7 +519,6 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         self.recv_legend.setHidden(True)
         self.change_legend.setHidden(True)
 
-        self.o_text = o_text = QTextBrowser()
         o_text.setOpenLinks(False)  # disable automatic link opening
         o_text.anchorClicked.connect(self._open_internal_link)  # send links to our handler
         self.o_text_has_selection = False
@@ -495,6 +529,7 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
         o_text.customContextMenuRequested.connect(self.on_context_menu_for_outputs)
         o_text.setFont(QFont(MONOSPACE_FONT))
         o_text.setReadOnly(True)
+        o_text.setTextInteractionFlags(o_text.textInteractionFlags() | Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
         vbox.addWidget(o_text)
         self.cashaddr_signal_slots.append(self.update_io)
         self.main_window.gui_object.cashaddr_toggled_signal.connect(self.update_io)
@@ -771,8 +806,8 @@ class TxDialog(QDialog, MessageBoxMixin, PrintError):
                 copy_list += [ ( _("Copy Amount"), lambda: self._copy_to_clipboard(value_fmtd, o_text) ) ]
             if ca_script:
                 copy_list += [ ( _("Copy Address (Embedded)"), lambda: self._copy_to_clipboard(ca_script.address.to_ui_string(), o_text) ) ]
-                if ca_script.is_complete():
-                    text_getter = lambda: self.wallet.cashacct.fmt_info(cashacct.Info.from_script(ca_script, self.tx_hash))
+                if ca_script.is_complete() and self.tx_hash:
+                    text_getter = lambda: self.wallet.cashacct.fmt_info(cashacct.Info.from_script(ca_script, self.tx_hash), emoji=True)
                     text_getter()  # go out to network to cache the shortest encoding for cash account name ahead of time...
                     copy_list += [ ( _("Copy Cash Account"), lambda: self._copy_to_clipboard(text_getter(), o_text) ) ]
         except (TypeError, ValueError, IndexError, KeyError) as e:

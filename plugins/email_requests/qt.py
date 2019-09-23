@@ -25,6 +25,7 @@
 
 import time
 import threading
+import queue
 import base64
 from functools import partial
 
@@ -44,19 +45,26 @@ from electroncash.paymentrequest import PaymentRequest
 from electroncash.i18n import _
 from electroncash_gui.qt.util import EnterButton, Buttons, CloseButton
 from electroncash_gui.qt.util import OkButton, WindowModalDialog
-from electroncash.util import Weak
+from electroncash.util import Weak, PrintError
 
 
-class Processor(threading.Thread):
+class Processor(threading.Thread, PrintError):
     polling_interval = 5*60
 
-    def __init__(self, imap_server, username, password, callback):
+    instance = None
+
+    def __init__(self, imap_server, username, password, callback, error_callback):
         threading.Thread.__init__(self)
+        Processor.instance = self
         self.daemon = True
         self.username = username
         self.password = password
         self.imap_server = imap_server
         self.on_receive = callback
+        self.on_error = error_callback
+        self.q = queue.Queue()
+
+    def diagnostic_name(self): return "Email.Processor"
 
     def poll(self):
         try:
@@ -81,13 +89,26 @@ class Processor(threading.Thread):
                     self.on_receive(pr_str)
 
     def run(self):
-        self.M = imaplib.IMAP4_SSL(self.imap_server)
-        self.M.login(self.username, self.password)
-        while True:
-            self.poll()
-            time.sleep(self.polling_interval)
-        self.M.close()
-        self.M.logout()
+        try:
+            self.M = imaplib.IMAP4_SSL(self.imap_server)
+            self.M.login(self.username, self.password)
+        except Exception as e:
+            self.print_error("Exception encountered, stopping plugin thread:", repr(e))
+            self.on_error(_("Email plugin could not connect to {server} as {username}, IMAP receive thread stopped.").format(server=self.imap_server, username=self.username))
+            return
+        try:
+            while Processor.instance is self:
+                self.poll()
+                try:
+                    self.q.get(timeout=self.polling_interval)  # sleep for polling_interval seconds
+                    return # if we get here, we were stopped
+                except queue.Empty:
+                    ''' If we get here, we slept for polling_interval seconds '''
+            self.M.close()
+            self.M.logout()
+        except Exception as e:
+            self.print_error("Exception encountered, stopping plugin thread:", repr(e))
+            self.on_error(_("Email plugin encountered an error, plugin stopped."))
 
     def send(self, recipient, message, payment_request):
         msg = MIMEMultipart()
@@ -107,6 +128,7 @@ class Processor(threading.Thread):
 
 class EmailSignalObject(QObject):
     email_new_invoice_signal = pyqtSignal()
+    email_error = pyqtSignal(str)
 
 
 class Plugin(BasePlugin):
@@ -126,15 +148,31 @@ class Plugin(BasePlugin):
         self.username = self.config.get('email_username', '')
         self.password = self.config.get('email_password', '')
         if self.imap_server and self.username and self.password:
-            self.processor = Processor(self.imap_server, self.username, self.password, self.on_receive)
+            self.processor = Processor(self.imap_server, self.username, self.password, self.on_receive, self.on_error)
             self.processor.start()
+        else:
+            self.processor = None
         self.obj = EmailSignalObject()
         self.obj.email_new_invoice_signal.connect(self.new_invoice)
+        self.obj.email_error.connect(self.on_error_qt)
+
+    def on_close(self):
+        ''' called on plugin close '''
+        Processor.instance = None  # tells thread that it is defunct
+        if self.processor and self.processor.is_alive():
+            self.processor.q.put(None)  # signal stop
+            self.processor.join(timeout=1.0)
 
     def on_receive(self, pr_str):
         self.print_error('received payment request')
         self.pr = PaymentRequest(pr_str)
         self.obj.email_new_invoice_signal.emit()
+
+    def on_error(self, err):
+        self.obj.email_error.emit(err)
+
+    def on_error_qt(self, err):
+        QMessageBox.warning(None, _("Email Error"), err)
 
     def new_invoice(self):
         self.parent.invoices.add(self.pr)
@@ -146,6 +184,9 @@ class Plugin(BasePlugin):
         menu.addAction(_("Send via e-mail"), lambda: self.send(window, addr))
 
     def send(self, window, addr):
+        if not self.processor:
+            window.show_warning(_('The email plugin is enabled but not configured. Please go to its settings and configure it, or disable it if you do not wish to use it.'))
+            return
         from electroncash import paymentrequest
         r = window.wallet.receive_requests.get(addr)
         message = r.get('memo', '')
@@ -155,7 +196,7 @@ class Plugin(BasePlugin):
             pr = paymentrequest.make_request(self.config, r)
         if not pr:
             return
-        recipient, ok = QInputDialog.getText(window, 'Send request', 'Email invoice to:')
+        recipient, ok = QInputDialog.getText(window, _('Send request'), _('Email invoice to:'))
         if not ok:
             return
         recipient = str(recipient)
@@ -163,8 +204,13 @@ class Plugin(BasePlugin):
         self.print_error('sending mail to', recipient)
         try:
             self.processor.send(recipient, message, payload)
-        except BaseException as e:
-            window.show_error(str(e))
+        except Exception as e:
+            self.print_error("Exception sending:", repr(e))
+            # NB; we don't want to actually display the exception message here
+            # because it may contain text from the server, which could be a
+            # potential phishing attack surface.  So instead we show the user
+            # the exception name which is something like ConnectionRefusedError.
+            window.show_error(_("Could not send email to {recipient}: {reason}").format(recipient=recipient, reason=type(e).__name__))
             return
 
         window.show_message(_('Request sent.'))
@@ -216,3 +262,4 @@ class Plugin(BasePlugin):
 
         password = str(password_e.text())
         self.config.set_key('email_password', password)
+        window.show_message(_('Please restart the plugin to activate the new settings'))

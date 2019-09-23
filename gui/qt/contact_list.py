@@ -36,24 +36,26 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from .util import (MyTreeWidget, webopen, WindowModalDialog, Buttons,
                    CancelButton, OkButton, HelpLabel, WWLabel,
-                   destroyed_print_error, webopen, ColorScheme, MONOSPACE_FONT)
+                   destroyed_print_error, webopen, ColorScheme, MONOSPACE_FONT,
+                   rate_limited)
 from enum import IntEnum
 from collections import defaultdict
-from typing import List, Set
+from typing import List, Set, Dict, Tuple
 from . import cashacctqt
 
 class ContactList(PrintError, MyTreeWidget):
-    filter_columns = [1, 2]  # Name, Address
+    filter_columns = [1, 2, 3]  # Name, Label, Address
     default_sort = MyTreeWidget.SortSpec(1, Qt.AscendingOrder)
 
     do_update_signal = pyqtSignal()
+    _ca_minimal_chash_updated_signal = pyqtSignal(object, str)
 
     class DataRoles(IntEnum):
         Contact     = Qt.UserRole + 0
 
     def __init__(self, parent):
         MyTreeWidget.__init__(self, parent, self.create_menu,
-                              ["", _('Name'), _('Address'), _('Type') ], 1, [1],  # headers, stretch_column, editable_columns
+                              ["", _('Name'), _('Label'), _('Address'), _('Type') ], 2, [1,2],  # headers, stretch_column, editable_columns
                               deferred_updates=True, save_sort_settings=True)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSortingEnabled(True)
@@ -64,30 +66,49 @@ class ContactList(PrintError, MyTreeWidget):
         self.cleaned_up = False
         self.do_update_signal.connect(self.update)
         self.icon_cashacct = QIcon(":icons/cashacct-logo.png" if not ColorScheme.dark_scheme else ":icons/cashacct-button-darkmode.png")
+        self.icon_openalias = QIcon(":icons/openalias-logo.svg")
         self.icon_contacts = QIcon(":icons/tab_contacts.png")
+        self.icon_unverif = QIcon(":/icons/unconfirmed.svg")
+        # the below dict is ephemeral and goes away on wallet close --
+        # it's populated ultimately by the notify() subsystem in main_window
+        self._ca_pending_conf : Dict[str, Tuple[str, Address]] = dict()  #  "txid" -> ("name", Address)
+
         if self.wallet.network:
-            self.wallet.network.register_callback(self._ca_callback, ['ca_verified_tx'])
+            self.wallet.network.register_callback(self._ca_callback, ['ca_verified_tx', 'ca_updated_minimal_chash'] )
+        self._ca_minimal_chash_updated_signal.connect(self._ca_update_chash)
+        self.parent.gui_object.cashaddr_toggled_signal.connect(self.update)
+
 
     def clean_up(self):
         self.cleaned_up = True
+        try: self._ca_minimal_chash_updated_signal.disconnect(self._ca_update_chash)
+        except TypeError: pass
+        try: self.do_update_signal.disconnect(self.update)
+        except TypeError: pass
+        try: self.parent.gui_object.cashaddr_toggled_signal.disconnect(self.update)
+        except TypeError: pass
         if self.wallet.network:
             self.wallet.network.unregister_callback(self._ca_callback)
 
-    def _ca_callback(self, e, *args):
-        if e == 'ca_verified_tx' and len(args) >= 2 and args[0] == self.wallet.cashacct:
-            # it's relevant to us when a verification comes in, so we need to
-            # schedule an update then
-            self.do_update_signal.emit()
-
     def on_permit_edit(self, item, column):
         # openalias items shouldn't be editable
+        if column == 2: # Label, always editable
+            return True
         return item.data(0, self.DataRoles.Contact).type in ('address', 'cashacct')
 
     def on_edited(self, item, column, prior_value):
         contact = item.data(0, self.DataRoles.Contact)
+        if column == 2: # Label
+            label_key = contact.address
+            try: label_key = Address.from_string(label_key).to_storage_string()
+            except: pass
+            self.wallet.set_label(label_key, item.text(2))
+            self.update() # force refresh in case 2 contacts use the same address
+            return
+        # else.. Name
         typ = contact.type
         was_cur, was_sel = bool(self.currentItem()), item.isSelected()
-        name, value = item.text(1), item.text(2)
+        name, value = item.text(1), item.text(3)
         del item  # paranoia
 
         # On success, parent.set_contact returns the new key (address text)
@@ -145,22 +166,26 @@ class ContactList(PrintError, MyTreeWidget):
     def _i2c(item : QTreeWidgetItem) -> Contact:
         return item.data(0, ContactList.DataRoles.Contact)
 
-    def _get_ca_unverified(self) -> Set[Contact]:
+    def _get_ca_unverified(self, include_temp=False) -> Set[Contact]:
         i2c = self._i2c
+        types = ('cashacct', 'cashacct_W')
+        if include_temp:
+            types = (*types, 'cashacct_T')
         return set(
             i2c(item)
             for item in self.get_leaves()
-            if i2c(item).type.startswith('cashacct') and not self.wallet.cashacct.get_verified(i2c(item).name)
+            if i2c(item).type in types and not self.wallet.cashacct.get_verified(i2c(item).name)
         )
 
     def create_menu(self, position):
         menu = QMenu()
         selected = self.selectedItems()
         i2c = self._i2c
-        ca_unverified = self._get_ca_unverified()
+        ca_unverified = self._get_ca_unverified(include_temp=False)
         if selected:
             names = [item.text(1) for item in selected]
             keys = [i2c(item) for item in selected]
+            payable_keys = [k for k in keys if k.type != 'cashacct_T']
             deletable_keys = [k for k in keys if k.type in contact_types]
             needs_verif_keys = [k for k in keys if k in ca_unverified]
             column = self.currentColumn()
@@ -170,10 +195,14 @@ class ContactList(PrintError, MyTreeWidget):
             typ = i2c(item).type if item else 'unknown'
             ca_info = None
             if item and typ in ('cashacct', 'cashacct_W'):
+                ca_info = self.wallet.cashacct.get_verified(i2c(item).name)
                 if column == 1 and len(selected) == 1:
                     # hack .. for Cash Accounts just say "Copy Cash Account"
                     column_title = _('Cash Account')
-                ca_info = self.wallet.cashacct.get_verified(i2c(item).name)
+                    if ca_info:
+                        column_data = self.wallet.cashacct.fmt_info(ca_info, emoji=True)
+            if len(selected) > 1:
+                column_title += f" ({len(selected)})"
             menu.addAction(_("Copy {}").format(column_title), lambda: self.parent.app.clipboard().setText(column_data))
             if item and column in self.editable_columns and self.on_permit_edit(item, column):
                 key = item.data(0, self.DataRoles.Contact)
@@ -183,23 +212,27 @@ class ContactList(PrintError, MyTreeWidget):
                 # means the item is deleted and you get a C++ object deleted
                 # runtime error.
                 menu.addAction(_("Edit {}").format(column_title), lambda: self._on_edit_item(key, column))
-            a = menu.addAction(_("Pay to"), lambda: self.parent.payto_contacts(keys))
-            if needs_verif_keys:
+            a = menu.addAction(_("Pay to"), lambda: self.parent.payto_contacts(payable_keys))
+            if needs_verif_keys or not payable_keys:
                 a.setDisabled(True)
             a = menu.addAction(_("Delete"), lambda: self.parent.delete_contacts(deletable_keys))
             if not deletable_keys:
-                a.setEnabled(False)
-            URLs = [web.BE_URL(self.config, 'addr', Address.from_string(key))
-                    for key in keys if Address.is_valid(key)]
-            if any(URLs):
-                menu.addAction(_("View on block explorer"), lambda: [URL and webopen(URL) for URL in URLs])
+                a.setDisabled(True)
+            URLs = [web.BE_URL(self.config, 'addr', Address.from_string(key.address))
+                    for key in keys if Address.is_valid(key.address)]
+            a = menu.addAction(_("View on block explorer"), lambda: [URL and webopen(URL) for URL in URLs])
+            if not any(URLs):
+                a.setDisabled(True)
             if ca_info:
                 menu.addAction(_("View registration tx..."), lambda: self.parent.do_process_from_txid(txid=ca_info.txid, tx_desc=self.wallet.get_label(ca_info.txid)))
+                if typ in ('cashacct_W', 'cashacct'):
+                    _contact_d = i2c(item)
+                    menu.addAction(_("Details..."), lambda: cashacctqt.cash_account_detail_dialog(self.parent, _contact_d.name))
             menu.addSeparator()
 
         menu.addAction(self.icon_cashacct,
-                       _("New Contact") + " - " + _("Cash Account"), self.new_cash_account_contact_dialog)
-        menu.addAction(self.icon_contacts, _("New Contact") + " - " + _("Address"), self.parent.new_contact_dialog)
+                       _("Add Contact") + " - " + _("Cash Account"), self.new_cash_account_contact_dialog)
+        menu.addAction(self.icon_contacts, _("Add Contact") + " - " + _("Address"), self.parent.new_contact_dialog)
         menu.addSeparator()
         menu.addAction(self.icon_cashacct,
                        _("Register Cash Account..."), self.parent.register_new_cash_account)
@@ -233,7 +266,7 @@ class ContactList(PrintError, MyTreeWidget):
 
             menu.addSeparator()
             num = len(ca_unverified)
-            a = menu.addAction(QIcon(":/icons/unconfirmed.svg"),
+            a = menu.addAction(self.icon_unverif,
                                ngettext("Verify {count} Cash Account",
                                         "Verify {count} Cash Accounts",
                                         num).format(count=num), kick_off_verify)
@@ -301,7 +334,10 @@ class ContactList(PrintError, MyTreeWidget):
             # Hmm.. invalid address?
             excl_chk = set()
         wallet_cashaccts = []
+        v_txids = set()
+        # Add the [Mine] pseudo-contacts
         for ca_info in self.wallet.cashacct.get_wallet_cashaccounts():
+            v_txids.add(ca_info.txid)
             name = self.wallet.cashacct.fmt_info(ca_info, emoji=False)
             if (name, ca_info.address) in excl_chk:
                 continue
@@ -310,7 +346,27 @@ class ContactList(PrintError, MyTreeWidget):
                 address = ca_info.address.to_ui_string(),
                 type = 'cashacct_W'
             ))
+        # Add the [Pend] pseudo-contacts
+        for txid, tup in self._ca_pending_conf.copy().items():
+            if txid in v_txids or self.wallet.cashacct.is_verified(txid):
+                self._ca_pending_conf.pop(txid, None)
+                continue
+            if tup in excl_chk:
+                continue
+            name, address = tup
+            wallet_cashaccts.append(Contact(
+                name = name,
+                address = address.to_ui_string(),
+                type = 'cashacct_T'
+            ))
         return wallet_cashaccts
+
+    @rate_limited(0.333, ts_after=True) # We rate limit the contact list refresh no more 3 per second
+    def update(self):
+        if self.cleaned_up:
+            # short-cut return if window was closed and wallet is stopped
+            return
+        super().update()
 
     def on_update(self):
         if self.cleaned_up:
@@ -326,21 +382,35 @@ class ContactList(PrintError, MyTreeWidget):
             'openalias'  : _('OpenAlias'),
             'cashacct'   : _('Cash Account'),
             'cashacct_W' : _('Cash Account') + ' [' + _('Mine') + ']',
+            'cashacct_T' : _('Cash Account') + ' [' + _('Pend') + ']',
             'address'    : _('Address'),
         })
         type_icons = {
+            'openalias'  : self.icon_openalias,
             'cashacct'   : self.icon_cashacct,
             'cashacct_W' : self.icon_cashacct,
+            'cashacct_T' : self.icon_unverif,
             'address'    : self.icon_contacts,
         }
         selected_items, current_item = [], None
         edited = self._edited_item_cur_sel
         for contact in self.get_full_contacts(include_pseudo=self.show_my_cashaccts):
             _type, name, address = contact.type, contact.name, contact.address
-            item = QTreeWidgetItem(["", name, address, type_names[_type]])
+            label_key = address
+            if _type in ('cashacct', 'cashacct_W', 'cashacct_T', 'address'):
+                try:
+                    # try and re-parse and re-display the address based on current UI string settings
+                    addy = Address.from_string(address)
+                    address = addy.to_ui_string()
+                    label_key = addy.to_storage_string()
+                    del addy
+                except:
+                    ''' This may happen because we may not have always enforced this as strictly as we could have in legacy code. Just move on.. '''
+            label = self.wallet.get_label(label_key)
+            item = QTreeWidgetItem(["", name, label, address, type_names[_type]])
             item.setData(0, self.DataRoles.Contact, contact)
             item.DataRole = self.DataRoles.Contact
-            if _type in ('cashacct', 'cashacct_W'):
+            if _type in ('cashacct', 'cashacct_W', 'cashacct_T'):
                 ca_info = self.wallet.cashacct.get_verified(name)
                 tt_warn = None
                 if ca_info:
@@ -355,13 +425,18 @@ class ContactList(PrintError, MyTreeWidget):
                         account_string = f'{ca_info.name}#{ca_info.number}.{ca_info.collision_hash};'
                     )
                 else:
-                    item.setIcon(0, QIcon(":icons/unconfirmed.svg"))
-                    tt_warn = tt = _('Warning: This Cash Account is not verified')
+                    item.setIcon(0, self.icon_unverif)
+                    if _type == 'cashacct_T':
+                        tt_warn = tt = _('Cash Account pending confirmation and/or verification')
+                    else:
+                        tt_warn = tt = _('Warning: This Cash Account is not verified')
                 item.setToolTip(0, tt)
                 if tt_warn: item.setToolTip(1, tt_warn)
-                item.setFont(2, self.monospace_font)
             if _type in type_icons:
-                item.setIcon(3, type_icons[_type])
+                item.setIcon(4, type_icons[_type])
+            # always give the "Address" field a monospace font even if it's
+            # not strictly an address such as openalias...
+            item.setFont(3, self.monospace_font)
             self.addTopLevelItem(item)
             if contact == current_contact or (contact == edited[0] and edited[1]):
                 current_item = item  # this key was the current item before and it hasn't gone away
@@ -392,3 +467,45 @@ class ContactList(PrintError, MyTreeWidget):
             info, min_chash, name = items[0]
             self.parent.set_contact(name, info.address.to_ui_string(), typ='cashacct')
             run_hook('update_contacts_tab', self)
+
+    def ca_update_potentially_unconfirmed_registrations(self, d : Dict[str, Tuple[str, Address]]):
+        added = 0
+        for txid, tup in d.items():
+            if self.wallet.cashacct.is_verified(txid):
+                continue
+            if txid not in self._ca_pending_conf:
+                name, address = tup
+                name += "#???.???;"
+                self._ca_pending_conf[txid] = (name, address)
+                added += 1
+        if added:
+            self.update()
+
+    def _ca_callback(self, e, *args):
+        ''' Called from the network thread '''
+        if self.cleaned_up or not args or args[0] != self.wallet.cashacct:
+            # not for us or we are cleaned_up
+            return
+        if e == 'ca_verified_tx':
+            # it's relevant to us when a verification comes in, so we need to
+            # schedule an update then. We don't check if the info object
+            # is "one of ours" because at this point it may be a NEW relevant
+            # contact.
+            self.do_update_signal.emit()
+        elif e == 'ca_updated_minimal_chash':
+            # In this case we do check if the update object is "one of ours"
+            # in the slot that this signal targets.
+            self._ca_minimal_chash_updated_signal.emit(args[1], args[2])
+
+    def _ca_update_chash(self, ca_info, ignored):
+        ''' Called in GUI thread as a result of the cash account subsystem
+        figuring out that a collision_hash can be represented shorter.
+        Kicked off by a get_minimal_chash() call that results in a cache miss. '''
+        if self.cleaned_up:
+            return
+        # performance -- don't update unless the new minimal_chash is one
+        # we care about
+        key = f'{ca_info.name}#{ca_info.number}'
+        items = self.findItems(key, Qt.MatchContains|Qt.MatchWrap|Qt.MatchRecursive, 1) or []
+        if items:
+            self.do_update_signal.emit()

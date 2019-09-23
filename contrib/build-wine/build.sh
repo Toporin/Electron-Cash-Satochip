@@ -35,41 +35,58 @@ set -e
 
 info "Using docker: $docker_version"
 
-SUDO=""  # on macOS (and others?) we don't do sudo for the docker commands ...
-if [ $(uname) = "Linux" ]; then
-    # .. on Linux we do
-    SUDO="sudo"
+# Only set SUDO if its not been set already
+if [ -z ${SUDO+x} ] ; then
+    SUDO=""  # on macOS (and others?) we don't do sudo for the docker commands ...
+    if [ $(uname) = "Linux" ]; then
+        # .. on Linux we do
+        SUDO="sudo"
+    fi
 fi
 
+USER_ID=$(id -u $USER)
+GROUP_ID=$(id -g $USER)
+
+# To prevent weird errors, img name must capture user:group id since the
+# Dockerfile receives those as args and sets up a /homedir in the image
+# owned by $USER_ID:$GROUP_ID
+IMGNAME="ec-wine-builder-img_${USER_ID}_${GROUP_ID}"
+
 info "Creating docker image ..."
-$SUDO docker build -t electroncash-wine-builder-img contrib/build-wine/docker \
+$SUDO docker build -t $IMGNAME \
+            --build-arg USER_ID=$USER_ID \
+            --build-arg GROUP_ID=$GROUP_ID \
+            contrib/build-wine/docker \
     || fail "Failed to create docker image"
 
 # This is the place where we checkout and put the exact revision we want to work
-# on. Docker will run mapping this directory to /opt/wine64/drive_c/electroncash
-# which inside wine will look lik c:\electroncash
+# on. Docker will run mapping this directory to /homedir/wine64/drive_c/electroncash
+# which inside wine will look like c:\electroncash.
 FRESH_CLONE=`pwd`/contrib/build-wine/fresh_clone
-FRESH_CLONE_DIR=$FRESH_CLONE/$GIT_DIR_NAME
+FRESH_CLONE_DIR="$FRESH_CLONE/$GIT_DIR_NAME"
 
 (
-    $SUDO rm -fr $FRESH_CLONE && \
-        mkdir -p $FRESH_CLONE && \
-        cd $FRESH_CLONE  && \
-        git clone $GIT_REPO && \
-        cd $GIT_DIR_NAME && \
+    $SUDO rm -fr "$FRESH_CLONE" && \
+        mkdir -p "$FRESH_CLONE" && \
+        cd "$FRESH_CLONE"  && \
+        git clone "$GIT_REPO" && \
+        cd "$GIT_DIR_NAME" && \
         git checkout $REV
 ) || fail "Could not create a fresh clone from git"
 
 (
     # NOTE: We propagate forward the GIT_REPO override to the container's env,
     # just in case it needs to see it.
-    $SUDO docker run -it \
+    $SUDO docker run $DOCKER_RUN_TTY \
+    -u $USER_ID:$GROUP_ID \
+    -e HOME=/homedir \
     -e GIT_REPO="$GIT_REPO" \
-    --name electroncash-wine-builder-cont \
-    -v $FRESH_CLONE_DIR:/opt/wine64/drive_c/electroncash \
+    -e PYI_SKIP_TAG="$PYI_SKIP_TAG" \
+    --name ec-wine-builder-cont \
+    -v "$FRESH_CLONE_DIR":/homedir/wine64/drive_c/electroncash:delegated \
     --rm \
-    --workdir /opt/wine64/drive_c/electroncash/contrib/build-wine \
-    electroncash-wine-builder-img \
+    --workdir /homedir/wine64/drive_c/electroncash/contrib/build-wine \
+    $IMGNAME \
     ./_build.sh $REV
 ) || fail "Build inside docker container failed"
 
@@ -77,15 +94,15 @@ popd
 
 info "Copying .exe files out of our build directory ..."
 mkdir -p dist/
-files=$FRESH_CLONE_DIR/contrib/build-wine/dist/*.exe
+files="$FRESH_CLONE_DIR"/contrib/build-wine/dist/*.exe
 for f in $files; do
-    bn=`basename $f`
-    cp -fpv $f dist/$bn || fail "Failed to copy $bn"
-    touch dist/$bn || fail "Failed to update timestamp on $bn"
+    bn=`basename "$f"`
+    cp -fpv "$f" dist/"$bn" || fail "Failed to copy $bn"
+    touch dist/"$bn" || fail "Failed to update timestamp on $bn"
 done
 
 info "Removing $FRESH_CLONE ..."
-$SUDO rm -fr $FRESH_CLONE
+$SUDO rm -fr "$FRESH_CLONE"
 
 echo ""
 info "Done. Built .exe files have been placed in dist/"

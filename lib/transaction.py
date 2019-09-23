@@ -32,7 +32,8 @@ from .caches import ExpiringCache
 
 from .bitcoin import *
 from .address import (PublicKey, Address, Script, ScriptOutput, hash160,
-                      UnknownAddress, OpCodes as opcodes)
+                      UnknownAddress, OpCodes as opcodes,
+                      P2PKH_prefix, P2PKH_suffix, P2SH_prefix, P2SH_suffix)
 from . import schnorr
 from . import util
 import struct
@@ -269,28 +270,25 @@ def parse_redeemScript(s):
     return m, n, x_pubkeys, pubkeys, redeemScript
 
 def get_address_from_output_script(_bytes):
-    try:
-        decoded = Script.get_ops(_bytes)
+    scriptlen = len(_bytes)
 
-        # The Genesis Block, self-payments, and pay-by-IP-address payments look like:
-        # 65 BYTES:... CHECKSIG
-        match = [ opcodes.OP_PUSHDATA4, opcodes.OP_CHECKSIG ]
-        if match_decoded(decoded, match):
-            return TYPE_PUBKEY, PublicKey.from_pubkey(decoded[0][1])
+    if scriptlen == 23 and _bytes.startswith(P2SH_prefix) and _bytes.endswith(P2SH_suffix):
+        # Pay-to-script-hash
+        return TYPE_ADDRESS, Address.from_P2SH_hash(_bytes[2:22])
 
-        # Pay-by-Bitcoin-address TxOuts look like:
-        # DUP HASH160 20 BYTES:... EQUALVERIFY CHECKSIG
-        match = [ opcodes.OP_DUP, opcodes.OP_HASH160, opcodes.OP_PUSHDATA4, opcodes.OP_EQUALVERIFY, opcodes.OP_CHECKSIG ]
-        if match_decoded(decoded, match):
-            return TYPE_ADDRESS, Address.from_P2PKH_hash(decoded[2][1])
+    if scriptlen == 25 and _bytes.startswith(P2PKH_prefix) and _bytes.endswith(P2PKH_suffix):
+        # Pay-to-pubkey-hash
+        return TYPE_ADDRESS, Address.from_P2PKH_hash(_bytes[3:23])
 
-        # p2sh
-        match = [ opcodes.OP_HASH160, opcodes.OP_PUSHDATA4, opcodes.OP_EQUAL ]
-        if match_decoded(decoded, match):
-            return TYPE_ADDRESS, Address.from_P2SH_hash(decoded[1][1])
-    except Exception as e:
-        print_error('{}: Failed to parse tx ouptut {}. Exception was: {}'.format(__name__, _bytes.hex(), repr(e)))
-        pass
+    if scriptlen == 35 and _bytes[0] == 33 and _bytes[1] in (2,3) and _bytes[34] == opcodes.OP_CHECKSIG:
+        # Pay-to-pubkey (compressed)
+        return TYPE_PUBKEY, PublicKey.from_pubkey(_bytes[1:34])
+
+    if scriptlen == 67 and _bytes[0] == 65 and _bytes[1] == 4 and _bytes[66] == opcodes.OP_CHECKSIG:
+        # Pay-to-pubkey (uncompressed)
+        return TYPE_PUBKEY, PublicKey.from_pubkey(_bytes[1:66])
+
+    # note: we don't recognize bare multisigs.
 
     return TYPE_SCRIPT, ScriptOutput.protocol_factory(bytes(_bytes))
 
@@ -615,11 +613,16 @@ class Transaction:
         return script
 
     @classmethod
-    def is_txin_complete(self, txin):
+    def is_txin_complete(cls, txin):
+        if txin['type'] == 'coinbase':
+            return True
         num_sig = txin.get('num_sig', 1)
+        if num_sig == 0:
+            return True
         x_signatures = txin['signatures']
         signatures = list(filter(None, x_signatures))
         return len(signatures) == num_sig
+
 
     @classmethod
     def get_preimage_script(self, txin):
@@ -719,6 +722,18 @@ class Transaction:
         ser = self.serialize()
         return self._txid(ser)
 
+    def txid_fast(self):
+        ''' Returns the txid by immediately calculating it from self.raw,
+        which is faster than calling txid() which does a full re-serialize
+        each time.  Note this should only be used for tx's that you KNOW are
+        complete and that don't contain our funny serialization hacks.
+
+        (The is_complete check is also not performed here because that
+        potentially can lead to unwanted tx deserialization). '''
+        if self.raw:
+            return self._txid(self.raw)
+        return self.txid()
+
     @staticmethod
     def _txid(raw_hex : str) -> str:
         return bh2u(Hash(bfh(raw_hex))[::-1])
@@ -740,6 +755,13 @@ class Transaction:
         return sum(val for tp, addr, val in self.outputs())
 
     def get_fee(self):
+        ''' Try and calculate the fee based on the input data, and returns it as
+        satoshis (int). Can raise one of: (KeyError, TypeError, ValueError) on
+        tx's where fee data is missing, so client code should catch these. '''
+        # first, check if coinbase; coinbase tx always has 0 fee
+        if self._inputs and self._inputs[0].get('type') == 'coinbase':
+            return 0
+        # otherwise just sum up all values - may raise
         return self.input_value() - self.output_value()
 
     @profiler
@@ -826,29 +848,43 @@ class Transaction:
 
     def sign(self, keypairs):
         for i, txin in enumerate(self.inputs()):
-            num = txin['num_sig']
             pubkeys, x_pubkeys = self.get_sorted_pubkeys(txin)
-            for j, x_pubkey in enumerate(x_pubkeys):
-                signatures = list(filter(None, txin['signatures']))
-                if len(signatures) == num:
+            for j, (pubkey, x_pubkey) in enumerate(zip(pubkeys, x_pubkeys)):
+                if self.is_txin_complete(txin):
                     # txin is complete
                     break
-                if x_pubkey in keypairs.keys():
-                    print_error("adding signature for", x_pubkey, "use schnorr?", self._sign_schnorr)
-                    sec, compressed = keypairs.get(x_pubkey)
-                    pubkey = public_key_from_private_key(sec, compressed)
-                    # add signature
-                    nHashType = 0x00000041 # hardcoded, perhaps should be taken from unsigned input dict
-                    pre_hash = Hash(bfh(self.serialize_preimage(i, nHashType)))
-                    if self._sign_schnorr:
-                        sig = self._schnorr_sign(pubkey, sec, pre_hash)
-                    else:
-                        sig = self._ecdsa_sign(sec, pre_hash)
-                    txin['signatures'][j] = bh2u(sig + bytes((nHashType & 0xff,)))
-                    txin['pubkeys'][j] = pubkey # needed for fd keys
-                    self._inputs[i] = txin
+                if pubkey in keypairs:
+                    _pubkey = pubkey
+                    kname = 'pubkey'
+                elif x_pubkey in keypairs:
+                    _pubkey = x_pubkey
+                    kname = 'x_pubkey'
+                else:
+                    continue
+                print_error(f"adding signature for input#{i} sig#{j}; {kname}: {_pubkey} schnorr: {self._sign_schnorr}")
+                sec, compressed = keypairs.get(_pubkey)
+                self._sign_txin(i, j, sec, compressed)
         print_error("is_complete", self.is_complete())
         self.raw = self.serialize()
+
+    def _sign_txin(self, i, j, sec, compressed):
+        '''Note: precondition is self._inputs is valid (ie: tx is already deserialized)'''
+        pubkey = public_key_from_private_key(sec, compressed)
+        # add signature
+        nHashType = 0x00000041 # hardcoded, perhaps should be taken from unsigned input dict
+        pre_hash = Hash(bfh(self.serialize_preimage(i, nHashType)))
+        if self._sign_schnorr:
+            sig = self._schnorr_sign(pubkey, sec, pre_hash)
+        else:
+            sig = self._ecdsa_sign(sec, pre_hash)
+        reason = []
+        if not self.verify_signature(bfh(pubkey), sig, pre_hash, reason=reason):
+            print_error(f"Signature verification failed for input#{i} sig#{j}, reason: {str(reason)}")
+            return None
+        txin = self._inputs[i]
+        txin['signatures'][j] = bh2u(sig + bytes((nHashType & 0xff,)))
+        txin['pubkeys'][j] = pubkey # needed for fd keys
+        return txin
 
     def get_outputs(self):
         """convert pubkeys to addresses"""

@@ -52,25 +52,28 @@ def parse_servers(result):
     """ parse servers list into dict format"""
     servers = {}
     for item in result:
-        host = item[1]
-        out = {}
-        version = None
-        pruning_level = '-'
-        if len(item) > 2:
-            for v in item[2]:
-                if re.match(r"[st]\d*", v):
-                    protocol, port = v[0], v[1:]
-                    if port == '': port = networks.net.DEFAULT_PORTS[protocol]
-                    out[protocol] = port
-                elif re.match(r"v(.?)+", v):
-                    version = v[1:]
-                elif re.match(r"p\d*", v):
-                    pruning_level = v[1:]
-                if pruning_level == '': pruning_level = '0'
-        if out:
-            out['pruning'] = pruning_level
-            out['version'] = version
-            servers[host] = out
+        try:
+            host = item[1]
+            out = {}
+            version = None
+            pruning_level = '-'
+            if len(item) > 2:
+                for v in item[2]:
+                    if re.match(r"[st]\d*", v):
+                        protocol, port = v[0], v[1:]
+                        if port == '': port = networks.net.DEFAULT_PORTS[protocol]
+                        out[protocol] = port
+                    elif re.match(r"v(.?)+", v):
+                        version = v[1:]
+                    elif re.match(r"p\d*", v):
+                        pruning_level = v[1:]
+                    if pruning_level == '': pruning_level = '0'
+            if out:
+                out['pruning'] = pruning_level
+                out['version'] = version
+                servers[host] = out
+        except (TypeError, ValueError, IndexError, KeyError) as e:
+            util.print_error("parse_servers:", item, repr(e))
     return servers
 
 def filter_version(servers):
@@ -202,6 +205,7 @@ class Network(util.DaemonThread):
     # override these at any time (iOS sets these to lower values).
     NODES_RETRY_INTERVAL = 60  # How often to retry a node we know about in secs, if we are connected to less than 10 nodes
     SERVER_RETRY_INTERVAL = 10  # How often to reconnect when server down in secs
+    MAX_MESSAGE_BYTES = 1024*1024*32 # = 32MB. The message size limit in bytes. This is to prevent a DoS vector whereby the server can fill memory with garbage data.
 
     def __init__(self, config=None):
         if config is None:
@@ -226,7 +230,7 @@ class Network(util.DaemonThread):
         self.pending_sends_lock = threading.Lock()
 
         self.pending_sends = []
-        self.message_id = 0
+        self.message_id = util.Monotonic(locking=True)
         self.verified_checkpoint = False
         self.verifications_required = 1
         # If the height is cleared from the network constants, we're
@@ -317,9 +321,9 @@ class Network(util.DaemonThread):
             # Translate the blockchain_updated and wallet_updated events
             # into the legacy 'updated' event for old external plugins that
             # still rely on this event existing. There are some external
-            # electron cash plugins that still use this event, as does android,
-            # and we need to keep this hack here so they don't break
-            # on new EC versions.  "Technical debt" :)
+            # electron cash plugins that still use this event, and we need
+            # to keep this hack here so they don't break on new EC
+            # versions.  "Technical debt" :)
             self.trigger_callback('updated')  # we will re-enter this function with event == 'updated' (triggering the warning in the elif clause below)
         elif event == 'verified2' and 'verified' in self.callbacks:
             # pop off the 'wallet' arg as the old bad 'verified' callback lacked it.
@@ -399,22 +403,32 @@ class Network(util.DaemonThread):
         considered if callback is not None.)
 
         Note that the special argument interface='random' will queue the request
-        on a random, currently active (connected) interface.
+        on a random, currently active (connected) interface.  Otherwise
+        `interface` should be None or a valid Interface instance.
 
-        Otherwise `interface` should be None or a valid Interface instance.
+
+        If no interface is available:
+            - If `callback` is supplied: the request will be enqueued and sent
+              later when an interface becomes available
+            - If callback is not supplied: an AssertionError exception is raised
         '''
         if interface is None:
             interface = self.interface
-        if interface == 'random':
-            interface = random.choice(self.get_interfaces(interfaces=True))
-        assert isinstance(interface, Interface), "queue_request: No interface! (request={} params={})".format(method, params)
-        message_id = self.message_id
-        self.message_id += 1
+        elif interface == 'random':
+            interface = random.choice(self.get_interfaces(interfaces=True)
+                                      or (None,))  # may set interface to None if no interfaces
+        message_id = self.message_id() # Note: self.message_id is a Monotonic (thread-safe) counter-object, see util.Monotonic
         if callback:
             if max_qlen and len(self.unanswered_requests) >= max_qlen:
                 # Indicate to client code we are busy
                 return None
             self.unanswered_requests[message_id] = [method, params, callback]
+            if not interface:
+                # Request was queued -- it should get sent if/when we get
+                # an interface in the future
+                return message_id
+        # Now, if no interface, we will raise AssertionError
+        assert isinstance(interface, Interface), "queue_request: No interface! (request={} params={})".format(method, params)
         if self.debug:
             self.print_error(interface.host, "-->", method, params, message_id)
         interface.queue_request(method, params, message_id)
@@ -461,8 +475,11 @@ class Network(util.DaemonThread):
         # We disable fee estimates. BCH doesn't need this code. For now 1 sat/B
         # is enough.
         self.config.requested_fee_estimates()
-        for i in bitcoin.FEE_TARGETS:
-            self.queue_request('blockchain.estimatefee', [i])
+        try:
+            for i in bitcoin.FEE_TARGETS:
+                self.queue_request('blockchain.estimatefee', [i])
+        except AssertionError:
+            '''No interface available.'''
 
     def get_status_value(self, key):
         if key == 'status':
@@ -727,26 +744,38 @@ class Network(util.DaemonThread):
         method = response.get('method')
         params = response.get('params')
 
+        # FIXME:
+        # Do more to enforce result correctness, has the right data type, etc.
+        # This code as it stands has been superficially audited for that but I
+        # suspect it's still possible for  a malicious server to cause clients
+        # to throw up a crash reporter by sending unexpected JSON data types
+        # or garbage data in the server response.
+
         # We handle some responses; return the rest to the client.
         if method == 'server.version':
-            self.on_server_version(interface, result)
+            if isinstance(result, list):
+                self.on_server_version(interface, result)
         elif method == 'blockchain.headers.subscribe':
             if error is None:
+                # on_notify_header below validates result is right type or format
                 self.on_notify_header(interface, result)
         elif method == 'server.peers.subscribe':
-            if error is None:
+            if error is None and isinstance(result, list):
                 self.irc_servers = parse_servers(result)
                 self.notify('servers')
         elif method == 'server.banner':
-            if error is None:
-                self.banner = result
+            if error is None and isinstance(result, str):
+                # limit banner results to 16kb to avoid minor DoS vector whereby
+                # server sends a huge block of slow-to-render emojis which
+                # brings some platforms to thier knees for a few minutes.
+                self.banner = result[:16384]
                 self.notify('banner')
         elif method == 'server.donation_address':
-            if error is None:
+            if error is None and isinstance(result, str):
                 self.donation_address = result
         elif method == 'blockchain.estimatefee':
             try:
-                if error is None and result > 0:
+                if error is None and isinstance(result, (int, float)) and result > 0:
                     i = params[0]
                     fee = int(result*COIN)
                     self.config.update_fee_estimates(i, fee)
@@ -756,15 +785,23 @@ class Network(util.DaemonThread):
                 self.print_error("bad server data in blockchain.estimatefee:", result, "error:", repr(e))
         elif method == 'blockchain.relayfee':
             try:
-                if error is None:
+                if error is None and isinstance(result, (int, float)):
                     self.relay_fee = int(result * COIN)
                     self.print_error("relayfee", self.relay_fee)
             except (TypeError, ValueError) as e:
                 self.print_error("bad server data in blockchain.relayfee:", result, "error:", repr(e))
         elif method == 'blockchain.block.headers':
-            self.on_block_headers(interface, request, response)
+            try:
+                self.on_block_headers(interface, request, response)
+            except Exception as e:
+                self.print_error(f"bad server response for {method}: {repr(e)} / {response}")
+                self.connection_down(interface.server)
         elif method == 'blockchain.block.header':
-            self.on_header(interface, request, response)
+            try:
+                self.on_header(interface, request, response)
+            except Exception as e:
+                self.print_error(f"bad server response for {method}: {repr(e)} / {response}")
+                self.connection_down(interface.server)
 
         for callback in callbacks:
             callback(response)
@@ -911,7 +948,7 @@ class Network(util.DaemonThread):
                 ct += 1
         ct2 = self._cancel_pending_sends(callback)
         if ct or ct2:
-            qname = getattr(callback, '__qualname__', '<unknown>')
+            qname = getattr(callback, '__qualname__', repr(callback))
             self.print_error("Removed {} unanswered client requests and {} pending sends for callback: {}".format(ct, ct2, qname))
 
     def connection_down(self, server, blacklist=False):
@@ -933,7 +970,7 @@ class Network(util.DaemonThread):
     def new_interface(self, server_key, socket):
         self.add_recent_server(server_key)
 
-        interface = Interface(server_key, socket)
+        interface = Interface(server_key, socket, max_message_bytes=self.MAX_MESSAGE_BYTES)
         interface.blockchain = None
         interface.tip_header = None
         interface.tip = 0

@@ -1,14 +1,14 @@
 from __future__ import absolute_import, division, print_function
 
 from code import InteractiveConsole
-from fnmatch import fnmatch
 import json
 import os
 from os.path import exists, join
-import pkg_resources
+import pkgutil
 import unittest
 
-from electroncash import commands, daemon, keystore, simple_config, storage, util, version
+from electroncash import commands, daemon, keystore, simple_config, storage, tests, util
+from electroncash.i18n import _
 from electroncash.storage import WalletStorage
 from electroncash.wallet import (ImportedAddressWallet, ImportedPrivkeyWallet, Standard_Wallet,
                                  Wallet)
@@ -16,8 +16,8 @@ from electroncash.wallet import (ImportedAddressWallet, ImportedPrivkeyWallet, S
 from android.preference import PreferenceManager
 
 
-CALLBACKS = ["banner", "fee", "interfaces", "new_transaction", "on_history", "on_quotes",
-             "servers", "status", "updated", "verified"]
+CALLBACKS = ["banner", "blockchain_updated", "fee", "interfaces", "new_transaction",
+             "on_history", "on_quotes", "servers", "status", "verified2", "wallet_updated"]
 
 
 class AndroidConsole(InteractiveConsole):
@@ -32,8 +32,11 @@ class AndroidConsole(InteractiveConsole):
     def interact(self):
         try:
             InteractiveConsole.interact(
-                self, banner=(f"Electron Cash {version.PACKAGE_VERSION}\n"
-                              f"Type 'help' for available commands and variables."))
+                self, banner=(
+                    _("WARNING!") + "\n" +
+                    _("Do not enter code here that you don't understand. Executing the wrong "
+                      "code could lead to your coins being irreversibly lost.") + "\n" +
+                    "Type 'help' for available commands and variables."))
         except SystemExit:
             pass
 
@@ -121,41 +124,35 @@ class AndroidCommands(commands.Commands):
             wallet.start_threads(self.network)
             self.daemon.add_wallet(wallet)
 
-        self.wallet = wallet
-        self.network.notify("updated")
-        return wallet
-
     def close_wallet(self, name=None):
         """Close a wallet"""
         self._assert_daemon_running()
-        if not name:
-            if not self.wallet:
-                print("Wallet not loaded")  # Same wording as in commands.py.
-                return
-            path = self.wallet.storage.path
-        else:
-            path = self._wallet_path(name)
-        self.daemon.stop_wallet(path)
-        if self.wallet and (path == self.wallet.storage.path):
-            self.wallet = None
-            self.network.notify("updated")
+        self.daemon.stop_wallet(self._wallet_path(name))
 
-    def create(self, name, password, seed=None, addresses=None, privkeys=None):
+    def create(self, name, password, seed=None, passphrase="", bip39_derivation=None,
+               master=None, addresses=None, privkeys=None):
         """Create or restore a new wallet"""
         path = self._wallet_path(name)
         if exists(path):
             raise FileExistsError(path)
         storage = WalletStorage(path)
 
-        if addresses:
+        if addresses is not None:
             wallet = ImportedAddressWallet.from_text(storage, addresses)
-        elif privkeys:
+        elif privkeys is not None:
             wallet = ImportedPrivkeyWallet.from_text(storage, privkeys)
         else:
-            if seed is None:
-                seed = self.make_seed()
-                print("Your wallet generation seed is:\n\"%s\"" % seed)
-            storage.put('keystore', keystore.from_seed(seed, "", False).dump())
+            if bip39_derivation is not None:
+                ks = keystore.from_bip39_seed(seed, passphrase, bip39_derivation)
+            elif master is not None:
+                ks = keystore.from_master_key(master)
+            else:
+                if seed is None:
+                    seed = self.make_seed()
+                    print("Your wallet generation seed is:\n\"%s\"" % seed)
+                ks = keystore.from_seed(seed, passphrase, False)
+
+            storage.put('keystore', ks.dump())
             wallet = Standard_Wallet(storage)
 
         wallet.update_password(None, password, True)
@@ -164,27 +161,30 @@ class AndroidCommands(commands.Commands):
 
     # BEGIN commands which only exist here.
 
+    def select_wallet(self, name):
+        if name is None:
+            self.wallet = None
+        else:
+            self.wallet = self.daemon.wallets[self._wallet_path(name)]
+        self.network.trigger_callback("wallet_updated", self.wallet)
+
     def list_wallets(self):
         """List available wallets"""
         return sorted([name for name in os.listdir(self._wallet_path())
                        if not name.endswith(storage.TMP_SUFFIX)])
 
-    def delete_wallet(self, name):
+    def delete_wallet(self, name=None):
         """Delete a wallet"""
-        path = self._wallet_path(name)
-        if self.wallet and (path == self.wallet.storage.path):
-            self.close_wallet()
-        os.remove(path)
+        os.remove(self._wallet_path(name))
 
     def unit_test(self):
         """Run all unit tests. Expect failures with functionality not present on Android,
         such as Trezor.
         """
-        test_pkg = "electroncash.tests"
         suite = unittest.defaultTestLoader.loadTestsFromNames(
-            [test_pkg + "." + filename[:-3]
-             for filename in pkg_resources.resource_listdir(test_pkg, "")
-             if fnmatch(filename, "test_*.py")])
+            tests.__name__ + "." + info.name
+            for info in pkgutil.iter_modules(tests.__path__)
+            if info.name.startswith("test_"))
         unittest.TextTestRunner(verbosity=2).run(suite)
 
     # END commands which only exist here.
@@ -193,13 +193,19 @@ class AndroidCommands(commands.Commands):
         if not self.daemon_running:
             raise Exception("Daemon not running")  # Same wording as in electron-cash script.
 
+    # Log callbacks on stderr so they'll appear in the console activity.
     def _on_callback(self, *args):
         util.print_stderr("[Callback] " + ", ".join(repr(x) for x in args))
 
     def _wallet_path(self, name=""):
-        wallets_dir = join(util.user_dir(), "wallets")
-        util.make_dir(wallets_dir)
-        return join(wallets_dir, name)
+        if name is None:
+            if not self.wallet:
+                raise ValueError("No wallet selected")
+            return self.wallet.storage.path
+        else:
+            wallets_dir = join(util.user_dir(), "wallets")
+            util.make_dir(wallets_dir)
+            return util.standardize_path(join(wallets_dir, name))
 
 
 all_commands = commands.known_commands.copy()

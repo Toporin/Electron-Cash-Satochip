@@ -47,6 +47,10 @@ from . import verifier
 from . import blockchain
 from . import caches
 
+# 'cashacct:' URI scheme. Used by Crescent Cash and Electron Cash and
+# other wallets in the future.
+URI_SCHEME = 'cashacct'
+
 # Cash Accounts protocol code prefix is 0x01010101
 # See OP_RETURN prefix guideline: https://github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/op_return-prefix-guideline.md
 protocol_code = bytes.fromhex("01010101")
@@ -62,10 +66,14 @@ collision_hash_accept_re = re.compile(f'^[0-9]{{{collision_hash_length}}}$')
 
 # mapping of Address.kind -> cash account data types
 _addr_kind_data_types = { Address.ADDR_P2PKH : 0x1, Address.ADDR_P2SH : 0x2 }
-_unsupported_types = { 0x03, 0x04, 0x81, 0x82, 0x83, 0x84 }
+_unsupported_types = { 0x03, 0x04, 0x83, 0x84 }
 # negative lengths here indicate advisory and not enforced.
 _data_type_lengths = { 0x1 : 20, 0x2 : 20, 0x3 : 80, 0x4 : -66, 0x81 : 20, 0x82 : 20, 0x83 : 80, 0x84 : -66 }
-_data_types_addr_kind = util.inv_dict(_addr_kind_data_types)
+_data_types_addr_kind = {
+    0x1  : Address.ADDR_P2PKH,  0x2 : Address.ADDR_P2SH,
+    0x81 : Address.ADDR_P2PKH, 0x82 : Address.ADDR_P2SH,  # FIXME: These should really map to SLP addresses, but this works too.
+}
+_preferred_types = { 0x1, 0x2 }  # these take precedence over 0x81, 0x82 in the case of multi registrations containing more than 1 type
 
 assert set(_unsupported_types) | set(_data_types_addr_kind) == set(_data_type_lengths)
 
@@ -293,6 +301,7 @@ class ScriptOutput(ScriptOutputBase):
         except UnicodeError as e:
             raise ArgumentError('CashAcct names must be ascii encoded', name_bytes) from e
         addresses = []
+        addresses_preferred = []  # subset of above with types either 0x1 or 0x2, all valid Address instances (may be empty if registration contained no 0x1/0x2)
         try:
             # parse the list of payment data (more than 1), and try and grab
             # the first address we understand (type 1 or 2)
@@ -309,7 +318,7 @@ class ScriptOutput(ScriptOutputBase):
                                 raise AssertionError('hash160 had wrong length')
                             else:
                                 util.print_error(f"parse_script: type 0x{type_byte:02x} had length {len(hash160_bytes)} != expected length of {req_len}, will proceed anyway")
-                        return Address(hash160_bytes, _data_types_addr_kind[type_byte])
+                        return Address(hash160_bytes, _data_types_addr_kind[type_byte]), type_byte
                     elif type_byte in _unsupported_types:
                         # unsupported type, just acknowledge this registration but
                         # mark the address as unknown
@@ -318,13 +327,17 @@ class ScriptOutput(ScriptOutputBase):
                             util.print_error(msg)
                             if strict:
                                 raise AssertionError(msg)
-                        return UnknownAddress(hash160_bytes)
+                        return UnknownAddress(hash160_bytes), type_byte
                     else:
                         raise ValueError(f'unknown cash address type 0x{type_byte:02x}')
                 # / get_address
-                addresses.append(get_address(op))
+                adr, type_byte = get_address(op)
+                addresses.append(adr)
+                if type_byte in _preferred_types and isinstance(adr, Address):
+                    addresses_preferred.append(adr)
+                del adr, type_byte  # defensive programming
             assert addresses
-            maybes = [a for a in addresses if isinstance(a, Address)]
+            maybes = [a for a in (addresses_preferred or addresses) if isinstance(a, Address)]
             address = (maybes and maybes[0]) or addresses[0]
         except Exception as e:
             # Paranoia -- this branch should never be reached at this point
@@ -439,6 +452,8 @@ def _ensure_bytes(arg, argname='Arg'):
             raise ArgumentError(f'{argname} could not be binhex decoded', arg) from e
     if not isinstance(arg, (bytes, bytearray)):
         raise ArgumentError(f'{argname} argument not a bytes-like-object', arg)
+    if isinstance(arg, bytearray):
+        arg = bytes(arg)  # ensure actual bytes so hash() works.
     return arg
 
 def _collision_hash(block_hash, txid):
@@ -528,13 +543,16 @@ class Info(namedtuple("Info", "name, address, number, collision_hash, emoji, txi
 
 
 servers = [
-    "https://cashacct.imaginary.cash",
-    "https://api.cashaccount.info"
+    "https://cashacct.imaginary.cash",  # Runs official 'cash-accounts' lookup server software
+    "https://api.cashaccount.info",     # Runs official 'cash-accounts' lookup server software
+    "https://cashacct.electroncash.dk", # Runs official 'cash-accounts' lookup server software
+    "https://electrum.imaginary.cash"   # Runs alternative server software: https://gitlab.com/paOol/lookup-server
 ]
 
-debug = False
+debug = False  # network debug setting. Set to True when developing to see more verbose information about network operations.
+timeout = 12.5  # default timeout used in various network functions, in seconds.
 
-def lookup(server, number, name=None, collision_prefix=None, timeout=10.0, exc=[], debug=debug) -> tuple:
+def lookup(server, number, name=None, collision_prefix=None, timeout=timeout, exc=[], debug=debug) -> tuple:
     ''' Synchronous lookup, returns a tuple of:
 
             block_hash, List[ RegTx(txid, script) namedtuples ]
@@ -622,7 +640,7 @@ def lookup(server, number, name=None, collision_prefix=None, timeout=10.0, exc=[
             exc.append(e)
 
 def lookup_asynch(server, number, success_cb, error_cb=None,
-                  name=None, collision_prefix=None, timeout=10.0, debug=debug):
+                  name=None, collision_prefix=None, timeout=timeout, debug=debug):
     ''' Like lookup() above, but spawns a thread and does its lookup
     asynchronously.
 
@@ -658,7 +676,7 @@ def lookup_asynch(server, number, success_cb, error_cb=None,
     t.start()
 
 def lookup_asynch_all(number, success_cb, error_cb=None, name=None,
-                      collision_prefix=None, timeout=10.0, debug=debug):
+                      collision_prefix=None, timeout=timeout, debug=debug):
     ''' Like lookup_asynch above except it tries *all* the hard-coded servers
     from `servers` and if all fail, then calls the error_cb exactly once.
     If any succeed, calls success_cb exactly once.
@@ -675,35 +693,62 @@ def lookup_asynch_all(number, success_cb, error_cb=None, name=None,
     my_servers = servers.copy()
     random.shuffle(my_servers)
     N = len(my_servers)
+    q = queue.Queue()
     lock = threading.Lock()
     n_ok, n_err = 0, 0
     def on_succ(res, server):
         nonlocal n_ok
+        q.put(None)
         with lock:
-            #util.print_error("success", n_ok+n_err)
+            if debug: util.print_error("success", n_ok+n_err, server)
             if n_ok:
                 return
             n_ok += 1
         success_cb(res, server)
-    def on_err(exc):
+    def on_err(exc, server):
         nonlocal n_err
+        q.put(None)
         with lock:
-            #util.print_error("error", n_ok+n_err)
+            if debug: util.print_error("error", n_ok+n_err, server, exc)
             if n_ok:
                 return
             n_err += 1
             if n_err < N:
                 return
         if error_cb:
-            #util.print_error("calling err")
             error_cb(exc)
-    for server in my_servers:
-        #util.print_error("server:", server)
-        lookup_asynch(server, number = number,
-                      success_cb = lambda res,_server=server: on_succ(res,_server),
-                      error_cb = on_err,
-                      name = name, collision_prefix = collision_prefix, timeout = timeout,
-                      debug = debug)
+    def do_lookup_all_staggered():
+        ''' Send req. out to all servers, staggering the requests every 200ms,
+        and stopping early after the first success.  The goal here is to
+        maximize the chance of successful results returned, with tolerance for
+        some servers being unavailable, while also conserving on bandwidth a
+        little bit and not unconditionally going out to ALL servers.'''
+        t0 = time.time()
+        for i, server in enumerate(my_servers):
+            if debug: util.print_error("server:", server, i)
+            lookup_asynch(server, number = number,
+                          success_cb = lambda res, _server=server: on_succ(res, _server),
+                          error_cb = lambda exc, _server=server: on_err(exc, _server),
+                          name = name, collision_prefix = collision_prefix, timeout = timeout,
+                          debug = debug)
+            try:
+                q.get(timeout=0.200)
+                while True:
+                    # Drain queue in case previous iteration's servers also
+                    # wrote to it while we were sleeping, so that next iteration
+                    # the queue is hopefully empty, to increase the chances
+                    # we get to sleep.
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            with lock:
+                if n_ok:  # check for success
+                    if debug:
+                        util.print_error(f"do_lookup_all_staggered: returning "
+                                         f"early on server {i} of {len(my_servers)} after {(time.time()-t0)*1e3} msec")
+                    return
+    t = threading.Thread(daemon=True, target=do_lookup_all_staggered)
+    t.start()
 
 class ProcessedBlock:
     __slots__ = ( 'hash',  # str binhex block header hash
@@ -803,10 +848,10 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
 
         self.ext_incomplete_tx = dict() # ephemeral (not saved) dict of txid -> RegTx (all regtx's are incomplete here)
 
-        # minimal collision hash encodings cache. keyed off (name.lower(), number, collision_hash) -> '03' string or '' string
-        self.minimal_ch_cache = caches.ExpiringCache(name=f"{self.wallet.diagnostic_name()} - CashAcct minimal collision_hash cache", timeout=3600.0)
+        # minimal collision hash encodings cache. keyed off (name.lower(), number, collision_hash) -> '03' string or '' string, serialized to disk for good UX on startup.
+        self.minimal_ch_cache = caches.ExpiringCache(name=f"{self.wallet.diagnostic_name()} - CashAcct minimal collision_hash cache")
 
-        # Dict of block_height -> ProcessedBlock
+        # Dict of block_height -> ProcessedBlock (not serialized to disk)
         self.processed_blocks = caches.ExpiringCache(name=f"{self.wallet.diagnostic_name()} - CashAcct processed block cache", maxlen=5000, timeout=3600.0)
 
     def diagnostic_name(self):
@@ -838,9 +883,9 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
         name2#100;
         name3#101.1234567890;
 
-        If emoji=True, then we will prepend the emoji character like so:
+        If emoji=True, then we will append the emoji character like so:
 
-        "🌶 NilacTheGrim#123.45"
+        "NilacTheGrim#123.45; 🌶"
 
         (Note that the returned string will always end in a semicolon.)
 
@@ -851,12 +896,16 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
         if minimal_chash is None:
             minimal_chash = self.get_minimal_chash(name, number, chash)
         if minimal_chash: minimal_chash = '.' + minimal_chash
-        emojipart = f'{info.emoji} ' if emoji and info.emoji else ''
-        return f"{emojipart}{name}#{number}{minimal_chash};"
+        emojipart = f' {info.emoji}' if emoji and info.emoji else ''
+        return f"{name}#{number}{minimal_chash};{emojipart}"
 
 
     _number_re = re.compile(r'^[0-9]{3,}$')
     _collision_re = re.compile(r'^[0-9]{0,10}$')
+
+    @staticmethod
+    def strip_emoji(s : str) -> str:
+        return ''.join(filter(lambda x: x not in emoji_set, s))
 
     @classmethod
     def parse_string(cls, s : str) -> tuple:
@@ -874,6 +923,8 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
 
         Does not raise, merely returns None on all errors.'''
         s = s.strip()
+        while s and s[-1] in emoji_set:
+            s = s[:-1].strip() # strip trailing "<space><emoji>"
         while s.endswith(';'):
             s = s[:-1]  # strip trailing ;
         parts = s.split('#')
@@ -904,7 +955,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             return None
         return name, number, collision_prefix
 
-    def resolve_verify(self, ca_string : str, timeout: float = 10.0) -> List[Tuple[Info, str]]:
+    def resolve_verify(self, ca_string : str, timeout: float = timeout, exc: list = None) -> List[Tuple[Info, str]]:
         ''' Blocking resolver for Cash Account names. Given a ca_string of the
         form: name#number[.123], will verify the block it is on and do other
         magic. It will return a list of tuple of (Info, minimal_chash).
@@ -916,7 +967,10 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
 
         timeout is a timeout in seconds. If timer expires None is returned.
 
-        It will return None on failure or nothing found. '''
+        It will return None on failure or nothing found.
+
+        Optional arg `exc` is where to put the exception on network or other
+        failure. '''
         tup = self.parse_string(ca_string)
         if not tup:
             return
@@ -928,6 +982,8 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             nonlocal pb
             if isinstance(thing, ProcessedBlock) and thing.reg_txs:
                 pb = thing
+            elif isinstance(thing, Exception) and isinstance(exc, list):
+                exc.append(thing)
             done.set()
         self.verify_block_asynch(number, success_cb=done_cb, error_cb=done_cb, timeout=timeout)
         if not done.wait(timeout=timeout) or not pb:
@@ -982,10 +1038,24 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
         def call_success_cb(min_ch):
             ''' Inform caller if they supplied a callback that the process is done. '''
             if success_cb: success_cb((name, number, collision_hash), min_ch)
-        found = None
+        found, pb_cached = None, None
         if not skip_caches:
             with self.lock:
                 found = self.minimal_ch_cache.get(key)
+                if found is None:
+                    # See if we have the block cached
+                    pb_cached = self.processed_blocks.get(num2bh(number))
+        if found is None and pb_cached is not None:
+            # We didn't have the chash but we do have the block, use that
+            # immediately without going out to network
+            tup = self._calc_minimal_chash(name, collision_hash, pb_cached)
+            if tup:
+                found = tup[1]
+                with self.lock:
+                    # Cache result
+                    self.minimal_ch_cache.put(key, found)
+            # clean up after ourselves
+            del tup
         if found is not None:
             call_success_cb(found)
             return found
@@ -1070,7 +1140,6 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
         is needed.'''
         self._init_data()
         dd = self.wallet.storage.get('cash_accounts_data', {})
-        #self.print_error("LOADED:", dd)
         wat_d = dd.get('wallet_reg_tx', {})
         eat_d = dd.get('ext_reg_tx', {})
         vtx_d = dd.get('verified_tx', {})
@@ -1084,13 +1153,20 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             if script.is_complete():
                 # sanity check
                 seen_scripts[txid] = script
-                self.wallet_reg_tx[txid] = self.RegTx(txid, script)
+            # Note we allow incomplete scripts in the wallet_reg_tx dict because
+            # the user may close wallet and restart and then verifier will see
+            # the tx as verified as it synchs, thus completing it.
+            # This is safe since by default _find_script() only returns complete
+            # scripts unless incomplete=True is specified.
+            self.wallet_reg_tx[txid] = self.RegTx(txid, script)
         for txid, script_dict in eat_d.items():
             script = ScriptOutput.from_dict(script_dict)
             if script.is_complete() and txid not in seen_scripts:
                 # sanity check
                 seen_scripts[txid] = script
-                self.ext_reg_tx[txid] = self.RegTx(txid, script)
+            # allow incomplete scripts to be loaded here too, in case
+            # verification comes in later.
+            self.ext_reg_tx[txid] = self.RegTx(txid, script)
         for txid, info in vtx_d.items():
             block_height, block_hash = info
             script = seen_scripts.get(txid)
@@ -1101,14 +1177,11 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             key = item[:-1]
             self.minimal_ch_cache.put(tuple(key), value)  # re-populate the cache
 
-        # re-enqueue previously unverified for verification.
+        # Re-enqueue previously unverified for verification.
         # they may come from either wallet or external source, but we
         # enqueue them with the private verifier here.
-        # FIXME: This means that failed/bad verifications will forever retry
-        # on wallet restart. TODO: handle this situation.
-        # FIXME2: Figure out how to deal with actual chain reorgs and detecting
-        # when a cash account no longer belongs to the best chain.  The situation
-        # now is we will forever try and verify them each wallet startup...
+        # Note that verification failures will cause the tx's to get popped
+        # and thus they shouldn't forever verify (see verification_failed et al).
         d = self.ext_reg_tx.copy()
         d.update(self.wallet_reg_tx)
         for txid, item in d.items():
@@ -1161,8 +1234,6 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
                 }
 
         self.wallet.storage.put('cash_accounts_data', data)
-
-        #self.print_error("SAVED:", data)
 
         if write:
             self.wallet.storage.write()
@@ -1245,7 +1316,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             return False
         return True
 
-    def verify_block_asynch(self, number : int, success_cb=None, error_cb=None, timeout=10.0, debug=debug):
+    def verify_block_asynch(self, number : int, success_cb=None, error_cb=None, timeout=timeout, debug=debug):
         ''' Tries all servers. Calls success_cb with the verified ProcessedBlock
         as the single argument on first successful retrieval of the block.
         Calls error_cb with the exc as the only argument on failure. Guaranteed
@@ -1287,7 +1358,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             else:
                 if debug: self.print_error(f"verify_block_asynch: #{number} already in-flight, will just enqueue callbacks")
 
-    def verify_block_synch(self, server : str, number : int, verify_txs=True, timeout=10.0, exc=[], debug=debug) -> ProcessedBlock:
+    def verify_block_synch(self, server : str, number : int, verify_txs=True, timeout=timeout, exc=[], debug=debug) -> ProcessedBlock:
         ''' Processes a whole block from the lookup server and returns it.
         Returns None on failure, and puts the Exception in the exc parameter.
 
@@ -1359,7 +1430,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
                 if event == 'ca_verified_tx':
                     if not num_needed():  # this implcititly checks if the tx's we care about are ready
                         q.put('done')
-                elif event == 'ca_verification_failed' and len(args) >= 3 and args[1] in pb.reg_txs:
+                elif event == 'ca_verification_failed' and args[1] in pb.reg_txs:
                     q.put(('failed', args[1], args[2]))
                     if args[2] == 'tx_not_found':
                         ctr = 0
@@ -1425,7 +1496,9 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
             self.print_error("Warning: Info object does not have an Address", info)
             return
         d = self.wallet.storage.get('cash_accounts_address_defaults', {})
-        d[info.address.to_storage_string()] = [info.name, info.number, info.collision_hash]
+        addr_str = info.address.to_storage_string()
+        new_value = [info.name, info.number, info.collision_hash]
+        d[addr_str] = new_value
         self.wallet.storage.put('cash_accounts_address_defaults', d)
 
 
@@ -1514,14 +1587,20 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
 
     def _find_script(self, txid, print_if_missing=True, *, incomplete=False, giveto=None):
         ''' lock should be held by caller '''
-        item = self.wallet_reg_tx.get(txid) or self.ext_reg_tx.get(txid)
+        maybes = (self.wallet_reg_tx.get(txid), self.ext_reg_tx.get(txid))
+        item = None
+        for maybe in maybes:
+            if maybe and (not item or (not item.script.is_complete() and maybe.script.is_complete())):
+                item = maybe
+        del maybe, maybes
         if not item and incomplete:
             item = self.ext_incomplete_tx.get(txid)
+        if item and not item.script.is_complete() and not incomplete:
+            item = None # refuse to return an incomplete tx unless incomplete=True
         if item:
             # Note the giveto with incomplete=True is fragile and requires
             # a call to _add_verified_tx_common right after this
-            # _find_script call. We want to maintain the invariant that
-            # wallet_reg_tx and ext_reg_tx both contain *complete* scripts.
+            # _find_script call.
             # Also note: we intentionally don't pop the ext_incomplete_tx
             # dict here as perhaps client code is maintaining a reference
             # and we want to update that reference later in add_verified_common.
@@ -1696,7 +1775,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
         in anticipation of a possible future verification coming in. '''
         with self.lock:
             self._rm_vtx(txid)
-            self._find_script(txid, False, giveto='w')
+            self._find_script(txid, False, giveto='w', incomplete=True)
 
     def on_address_addition(self, address):
         ''' Called by wallet when a new address is added in imported wallet.'''
@@ -1815,7 +1894,7 @@ class CashAcct(util.PrintError, verifier.SPVDelegate):
     # Experimental Methods (stuff we may not use) #
     ###############################################
 
-    def scan_servers_for_registrations(self, start=100, stop=None, progress_cb=None, error_cb=None, timeout=10.0,
+    def scan_servers_for_registrations(self, start=100, stop=None, progress_cb=None, error_cb=None, timeout=timeout,
                                        add_only_mine=True, debug=debug):
         ''' This is slow and not particularly useful.  Will maybe delete this
         code soon. I used it for testing to populate wallet.

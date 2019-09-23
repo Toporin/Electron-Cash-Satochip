@@ -24,7 +24,7 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import signal, sys, traceback, gc, os
+import gc, os, platform, shutil, signal, sys, traceback
 
 try:
     import PyQt5
@@ -86,11 +86,10 @@ class ElectrumGui(QObject, PrintError):
         __class__.instance = self
         set_language(config.get('language'))
 
-        if sys.platform in ('win32', 'cygwin'):
-            # TODO: Make using FreeType on Windows configurable
-            # Use FreeType for font rendering on Windows. This fixes rendering of the Schnorr
-            # sigil and allows us to load the Noto Color Emoji font if needed.
-            os.environ['QT_QPA_PLATFORM'] = 'windows:fontengine=freetype'
+        self.config = config
+        self.daemon = daemon
+        self.plugins = plugins
+        self.windows = []
 
         # Uncomment this call to verify objects are being properly
         # GC-ed when windows are closed
@@ -101,40 +100,17 @@ class ElectrumGui(QObject, PrintError):
         #    from electroncash.synchronizer import Synchronizer
         #    daemon.network.add_jobs([DebugMem([Abstract_Wallet, SPV, Synchronizer,
         #                                       ElectrumWindow], interval=5)])
-        QCoreApplication.setAttribute(Qt.AA_X11InitThreads)
-        if hasattr(Qt, "AA_ShareOpenGLContexts"):
-            QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-        if sys.platform not in ('darwin',) and hasattr(Qt, "AA_EnableHighDpiScaling"):
-            # The below only applies to non-macOS. On macOS this setting is
-            # never used (because it is implicitly auto-negotiated by the OS
-            # in a differernt way).
-            #
-            # qt_disable_highdpi will be set to None by default, or True if
-            # specified on command-line.  The command-line override is intended
-            # to supporess high-dpi mode just for this run for testing.
-            #
-            # The more permanent setting is qt_enable_highdpi which is the GUI
-            # preferences option, so we don't enable highdpi if it's explicitly
-            # set to False in the GUI.
-            #
-            # The default on Linux, Windows, etc is to enable high dpi
-            disable_scaling = config.get('qt_disable_highdpi', False)
-            enable_scaling = config.get('qt_enable_highdpi', True)
-            if not disable_scaling and enable_scaling:
-                QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-        if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-            QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-        if hasattr(QGuiApplication, 'setDesktopFileName'):
-            QGuiApplication.setDesktopFileName('electron-cash.desktop')
-        self.config = config
-        self.daemon = daemon
-        self.plugins = plugins
-        self.windows = []
-        self.app = QApplication(sys.argv)
+
+        call_after_app = self._pre_and_post_app_setup()
+        try:
+            self.app = QApplication(sys.argv)
+        finally:
+            call_after_app()
+
+        self._load_fonts()  # this needs to be done very early, before the font engine loads fonts.. out of paranoia
+        self._exit_if_required_pyqt_is_missing()  # This may immediately exit the app if missing required PyQt5 modules, so it should also be done early.
         self.new_version_available = None
         self._set_icon()
-        self._exit_if_required_pyqt_is_missing()  # This may immediately exit the app if missing required PyQt5 modules.
-        self._load_fonts()
         self.app.installEventFilter(self)
         self.timer = QTimer(self); self.timer.setSingleShot(False); self.timer.setInterval(500) #msec
         self.gc_timer = QTimer(self); self.gc_timer.setSingleShot(True); self.gc_timer.timeout.connect(ElectrumGui.gc); self.gc_timer.setInterval(500) #msec
@@ -171,6 +147,8 @@ class ElectrumGui(QObject, PrintError):
         # again here just in case some plugin modified the color scheme.
         ColorScheme.update_from_widget(QWidget())
 
+        self._check_and_warn_qt_version()
+
     def __del__(self):
         stale = True
         if __class__.instance is self:
@@ -180,6 +158,85 @@ class ElectrumGui(QObject, PrintError):
         if hasattr(super(), '__del__'):
             super().__del__()
 
+    def _pre_and_post_app_setup(self):
+        ''' Call this before instantiating the QApplication object.  It sets up
+        some platform-specific miscellany that need to happen before the
+        QApplication is constructed.
+
+        A function is returned.  This function *must* be called after the
+        QApplication is constructed. '''
+        callables = []
+        def call_callables():
+            for func in callables:
+                func()
+        ret = call_callables
+
+        if hasattr(QGuiApplication, 'setDesktopFileName'):
+            QGuiApplication.setDesktopFileName('electron-cash.desktop')
+
+        if self.windows_qt_use_freetype:
+            # Use FreeType for font rendering on Windows. This fixes rendering
+            # of the Schnorr sigil and allows us to load the Noto Color Emoji
+            # font if needed.
+            os.environ['QT_QPA_PLATFORM'] = 'windows:fontengine=freetype'
+
+        QCoreApplication.setAttribute(Qt.AA_X11InitThreads)
+        if hasattr(Qt, "AA_ShareOpenGLContexts"):
+            QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+        if sys.platform not in ('darwin',) and hasattr(Qt, "AA_EnableHighDpiScaling"):
+            # The below only applies to non-macOS. On macOS this setting is
+            # never used (because it is implicitly auto-negotiated by the OS
+            # in a differernt way).
+            #
+            # qt_disable_highdpi will be set to None by default, or True if
+            # specified on command-line.  The command-line override is intended
+            # to supporess high-dpi mode just for this run for testing.
+            #
+            # The more permanent setting is qt_enable_highdpi which is the GUI
+            # preferences option, so we don't enable highdpi if it's explicitly
+            # set to False in the GUI.
+            #
+            # The default on Linux, Windows, etc is to enable high dpi
+            disable_scaling = self.config.get('qt_disable_highdpi', False)
+            enable_scaling = self.config.get('qt_enable_highdpi', True)
+            if not disable_scaling and enable_scaling:
+                QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+        if hasattr(Qt, "AA_UseHighDpiPixmaps"):
+            QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+        # macOS Mojave "font rendering looks terrible on PyQt5.11" workaround.
+        # See: https://old.reddit.com/r/apple/comments/9leavs/fix_mojave_font_rendering_issues_on_a_perapp_basis/
+        # This affects PyQt 5.11 (which is what we ship in the macOS El Capitan
+        # .dmg).  We apply the workaround and also warn the user to not use
+        # the El Capitan compatibility .dmg.
+        if sys.platform in ('darwin',) and self.qt_version() < (5, 12):
+            # macOS hacks. On Mojave with PyQt <5.12 the font rendering is terrible.
+            # As a workaround we need to temporarily set this 'defaults' keys
+            # which we immediately disable after the QApplication is started.
+            try:
+                ver = tuple(int(a) for a in platform.mac_ver()[0].split('.'))
+            except (TypeError, ValueError):
+                self.print_error("WARNING: Cannot parse platform.mac_ver", f"'{platform.mac_ver()[0]}'")
+                ver = None
+            if ver and ver >= (10, 14):
+                from electroncash.utils import macos
+                self.print_error("Mojave+ with PyQt<5.12 detected; applying CGFontRenderingFontSmoothingDisabled workaround...")
+                bundle = macos.get_bundle_identifier()
+                os.system(f'defaults write {bundle} CGFontRenderingFontSmoothingDisabled -bool NO')
+                def undo_hack():
+                    os.system(f'defaults delete {bundle} CGFontRenderingFontSmoothingDisabled')
+                    self.print_error("Mojave+ font rendering workaround applied.")
+                    #msg = _("Mojave or newer system detected, however you are running the "
+                    #        "El Capitan compatibility release of Electron Cash. "
+                    #        "Font and graphics rendering may be affected."
+                    #        "\n\nPlease obtain the latest non-compatibility version "
+                    #        "of Electron Cash for MacOS.")
+                    #QMessageBox.warning(None, _("Warning"), msg)  # this works even if app is not exec_() yet.
+
+                callables.append(undo_hack)
+
+        return ret
+
     def _exit_if_required_pyqt_is_missing(self):
         ''' Will check if required PyQt5 modules are present and if not,
         display an error message box to the user and immediately quit the app.
@@ -187,16 +244,18 @@ class ElectrumGui(QObject, PrintError):
         This is because some Linux systems break up PyQt5 into multiple
         subpackages, and for instance PyQt5 QtSvg is its own package, and it
         may be missing.
-
-        This happens on Linux mint.  See #1436. '''
+        '''
         try:
             from PyQt5 import QtSvg
         except ImportError:
             # Closes #1436 -- Some "Run from source" Linux users lack QtSvg
             # (partial PyQt5 install)
-            msg = _("A required Qt module, QtSvg was not found. Please fully install all of PyQt5 5.11 or above to resolve this issue.")
+            msg = _("A required Qt module, QtSvg was not found. Please fully install all of PyQt5 5.12 or above to resolve this issue.")
             if sys.platform == 'linux':
-                msg += "\n\n" + _("On Linux, you may try:\n\npython3 -m pip install --user -I pyqt5")
+                msg += "\n\n" + _("On Linux, you may try:\n\n    python3 -m pip install --user -I pyqt5")
+                if shutil.which('apt'):
+                    msg += "\n\n" + _("On Debian-based distros, you can run:\n\n    sudo apt install python3-pyqt5.qtsvg")
+
             QMessageBox.critical(None, _("QtSvg Missing"), msg)  # this works even if app is not exec_() yet.
             self.app.exit(1)
             sys.exit(msg)
@@ -265,21 +324,34 @@ class ElectrumGui(QObject, PrintError):
         timer.setSingleShot(True); timer.timeout.connect(timeout); timer.start(10000)  # 10 sec
 
     def _set_icon(self):
+        icon = None
         if sys.platform == 'darwin':
             # on macOS, in "running from source" mode, we want to set the app
             # icon, otherwise we get the generic Python icon.
             # In non-running-from-source mode, macOS will get the icon from
             # the .app bundle Info.plist spec (which ends up being
-            # electron.icns anyway).
+            # electron.icns).  However, in .app mode, Qt will not know about
+            # this icon and won't be able to use it for e.g. the About dialog.
+            # In the latter case the branch below will tell Qt to use
+            # electron-cash.svg as the "window icon".
             icon = QIcon("electron.icns") if os.path.exists("electron.icns") else None
-        else:
-            # Unconditionally set this on all other platforms as it can only
-            # help and never harm, and is always available.
-            icon = QIcon(":icons/electron.svg")
+        if not icon:
+            # Set this on all other platforms (and macOS built .app) as it can
+            # only help and never harm, and is always available.
+            icon = QIcon(":icons/electron-cash.svg")
         if icon:
             self.app.setWindowIcon(icon)
 
+    @staticmethod
+    def qt_version() -> tuple:
+        ''' Returns a 3-tuple of the form (major, minor, revision) eg
+        (5, 12, 4) for the current Qt version derived from the QT_VERSION
+        global provided by Qt. '''
+        return ( (QT_VERSION >> 16) & 0xff,  (QT_VERSION >> 8) & 0xff, QT_VERSION & 0xff )
+
     def _load_fonts(self):
+        ''' All apologies for the contorted nature of this platform code.
+        Fonts on Windows & Linux are .. a sensitive situation. :) '''
         # Only load the emoji font on Linux and Windows
         if sys.platform not in ('linux', 'win32', 'cygwin'):
             return
@@ -287,10 +359,55 @@ class ElectrumGui(QObject, PrintError):
         # TODO: Check if we already have the needed emojis
         # TODO: Allow the user to download a full color emoji set
 
-        emojis_ttf_path = os.path.join(os.path.dirname(__file__), 'data', 'emojis.ttf')
+        linux_font_config_file = os.path.join(os.path.dirname(__file__), 'data', 'fonts.xml')
+        emojis_ttf_name = 'ecsupplemental_lnx.ttf'
+        emojis_ttf_path = os.path.join(os.path.dirname(__file__), 'data', emojis_ttf_name)
+        did_set_custom_fontconfig = False
+
+        if (sys.platform == 'linux'
+                and self.linux_qt_use_custom_fontconfig  # method-backed property, checks config settings
+                and not os.environ.get('FONTCONFIG_FILE')
+                and os.path.exists('/etc/fonts/fonts.conf')
+                and os.path.exists(linux_font_config_file)
+                and os.path.exists(emojis_ttf_path)
+                and self.qt_version() >= (5, 12)):  # doing this on Qt < 5.12 causes harm and makes the whole app render fonts badly
+            # On Linux, we override some fontconfig rules by loading our own
+            # font config XML file. This makes it so that our custom emojis and
+            # other needed glyphs are guaranteed to get picked up first,
+            # regardless of user font config.  Without this some Linux systems
+            # had black and white or missing emoji glyphs.  We only do this if
+            # the user doesn't have their own fontconfig file in env and
+            # also as a sanity check, if they have the system
+            # /etc/fonts/fonts.conf file in the right place.
+            os.environ['FONTCONFIG_FILE'] = linux_font_config_file
+            did_set_custom_fontconfig = True
+
+        if sys.platform in ('win32', 'cygwin'):
+            env_var = os.environ.get('QT_QPA_PLATFORM')
+            if not env_var or 'windows:fontengine=freetype' not in env_var.lower():
+                # not set up to use freetype, so loading the .ttf would fail.
+                # abort early.
+                return
+            del env_var
+            # use a different .ttf file on Windows
+            emojis_ttf_name = 'ecsupplemental_win.ttf'
+            emojis_ttf_path = os.path.join(os.path.dirname(__file__), 'data', emojis_ttf_name)
 
         if QFontDatabase.addApplicationFont(emojis_ttf_path) < 0:
-            self.print_error('failed to add unicode emoji font to application fonts')
+            self.print_error('Failed to add unicode emoji font to application fonts:', emojis_ttf_path)
+            if did_set_custom_fontconfig:
+                self.print_error('Deleting custom (fonts.xml) FONTCONFIG_FILE env. var')
+                del os.environ['FONTCONFIG_FILE']
+
+    def _check_and_warn_qt_version(self):
+        if sys.platform == 'linux' and self.qt_version() < (5, 12):
+            msg = _("Electron Cash on Linux requires PyQt5 5.12+.\n\n"
+                    "You have version {version_string} installed.\n\n"
+                    "Please upgrade otherwise you may experience "
+                    "font rendering issues with emojis and other unicode "
+                    "characters used by Electron Cash.").format(version_string=QT_VERSION_STR)
+            QMessageBox.warning(None, _("PyQt5 Upgrade Needed"), msg)  # this works even if app is not exec_() yet.
+
 
     def eventFilter(self, obj, event):
         ''' This event filter allows us to open bitcoincash: URIs on macOS '''
@@ -710,7 +827,7 @@ class ElectrumGui(QObject, PrintError):
         if self.tray:
             try:
                 # this requires Qt 5.9
-                self.tray.showMessage("Electron Cash", message, QIcon(":icons/electron.svg"), 20000)
+                self.tray.showMessage("Electron Cash", message, QIcon(":icons/electron-cash.svg"), 20000)
             except TypeError:
                 self.tray.showMessage("Electron Cash", message, QSystemTrayIcon.Information, 20000)
 
@@ -738,30 +855,43 @@ class ElectrumGui(QObject, PrintError):
             self.config.set_key('hide_cashaddr_button', bool(b))
             self.cashaddr_status_button_hidden_signal.emit(b)
 
-    def test_emoji_fonts(self) -> bool:
-        ''' Returns True if we can render all of the emoji fonts we need,
-        False otherwise. This needs to be called after the QApplication has
-        already been instantiated, which is why it's an instance method. Even
-        though this contains a loop over many characters we need, it ends up
-        having the following performance: first run is ~130 msec, subsequent
-        runs are ~10 msec total (on moderate hardware).'''
-        from electroncash import cashacct
-        #from . import network_dialog as nd
+    @property
+    def windows_qt_use_freetype(self):
+        ''' Returns True iff we are windows and we are set to use freetype as
+        the font engine.  This will always return false on platforms where the
+        question doesn't apply. This config setting defaults to True for
+        Windows < Win10 and False otherwise. It is only relevant when
+        using the Qt GUI, however. '''
+        if sys.platform not in ('win32', 'cygwin'):
+            return False
+        try:
+            winver = float(platform.win32_ver()[0])  # '7', '8', '8.1', '10', etc
+        except (AttributeError, ValueError, IndexError):
+            # We can get here if cygwin, which has an empty win32_ver tuple
+            # in some cases.
+            # In that case "assume windows 10" and just proceed.  Cygwin users
+            # can always manually override this setting from GUI prefs.
+            winver = 10
+        # setting defaults to on for Windows < Win10
+        return bool(self.config.get('windows_qt_use_freetype', winver < 10))
 
-        fontm = QFontMetrics(QFont())
-        fontm_mono = QFontMetrics(QFont(MONOSPACE_FONT))
+    @windows_qt_use_freetype.setter
+    def windows_qt_use_freetype(self, b):
+        if self.config.is_modifiable('windows_qt_use_freetype') and sys.platform in ('win32', 'cygwin'):
+            self.config.set_key('windows_qt_use_freetype', bool(b))
 
-        emojis = set(cashacct.emoji_list)
-        # Note the below characters are not emojis, so they do not need to
-        # be included in this test. The rationale is these characters for
-        # the network dialog are not 100% critical to the UI, and they also
-        # are not in the solution we will recommend:install NotoColorEmoji.ttf.
-        # Uncomment if you wish to also check for these characters, however.
-        #emojis |= set(ord(ch) for ch in nd.ServerFlag.Symbol + nd.ServerFlag.UnSymbol if ch)
-        for uval in emojis:
-            if not fontm.inFontUcs4(uval) or not fontm_mono.inFontUcs4(uval):
-                return False
-        return True
+    @property
+    def linux_qt_use_custom_fontconfig(self):
+        ''' Returns True iff we are Linux and we are set to use the fonts.xml
+        fontconfig override, False otherwise.  This config setting defaults to
+        True for all Linux, but only is relevant to Qt GUI. '''
+        return bool(sys.platform in ('linux',) and self.config.get('linux_qt_use_custom_fontconfig', True))
+
+    @linux_qt_use_custom_fontconfig.setter
+    def linux_qt_use_custom_fontconfig(self, b):
+        if self.config.is_modifiable('linux_qt_use_custom_fontconfig') and sys.platform in ('linux',):
+            self.config.set_key('linux_qt_use_custom_fontconfig', bool(b))
+
 
     def main(self):
         try:

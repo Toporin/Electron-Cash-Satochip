@@ -40,7 +40,6 @@ from electroncash.i18n import _
 from electroncash.util import print_error, profiler, PrintError, Weak, format_satoshis_plain, finalization_print_error
 from electroncash.network import Network
 from electroncash.address import Address
-from electroncash.bitcoin import COINBASE_MATURITY
 from electroncash.transaction import Transaction
 from electroncash.simple_config import SimpleConfig, get_config
 from electroncash.wallet import Abstract_Wallet
@@ -71,12 +70,15 @@ def my_custom_item_setup(utxo_list, item, utxo, name):
         return
 
     prog = utxo_list.in_progress.get(name, "")
-    frozenstring = item.data(0, Qt.UserRole+1) or ""
+    frozenstring = item.data(0, utxo_list.DataRoles.frozen_flags) or ""
     is_reshuffle = name in utxo_list.wallet._reshuffles
+    is_slp = 's' in frozenstring
 
     u_value = utxo['value']
 
-    if not is_reshuffle and utxo_list.wallet.is_coin_shuffled(utxo):  # already shuffled
+    if is_slp:
+        item.setText(5, _("SLP Token"))
+    elif not is_reshuffle and utxo_list.wallet.is_coin_shuffled(utxo):  # already shuffled
         item.setText(5, _("Shuffled"))
     elif not is_reshuffle and utxo['address'] in utxo_list.wallet._shuffled_address_cache:  # we hit the cache directly as a performance hack. we don't really need a super-accurate reply as this is for UI and the cache will eventually be accurate
         item.setText(5, _("Shuffled Addr"))
@@ -91,10 +93,7 @@ def my_custom_item_setup(utxo_list, item, utxo, name):
             item.setText(5, _("Unconfirmed (reshuf)"))
         else:
             item.setText(5, _("Unconfirmed"))
-# for now we unconditionally disallow coinbase coins. See CashShuffle issue #64
-#    elif utxo['coinbase'] and (utxo['height'] + COINBASE_MATURITY > utxo_list.wallet.get_local_height()): # maturity check
-#        item.setText(5, _("Not mature"))
-    elif utxo['coinbase']:  # we disallow coinbase coins
+    elif utxo['coinbase']:  # we disallow coinbase coins unconditionally -- due to miner feedback (they don't like shuffling these)
         item.setText(5, _("Coinbase"))
     elif (u_value >= BackgroundShufflingThread.LOWER_BOUND
               and u_value < BackgroundShufflingThread.UPPER_BOUND): # queued_labels

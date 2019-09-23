@@ -6,6 +6,11 @@ pushd "$here"
 here=`pwd`  # get an absolute path
 popd
 . "$here"/../base.sh # functions we use below (fail, et al)
+# Note: 3.6.9 is our PYTHON_VERSION in other builds, but for some reason
+# Python.org didn't bother to build Python 3.6.9 for Windows (and no .msi files
+# exist for this release).  So, we hard-code 3.6.8 for Windows builds.
+# See: https://www.python.org/downloads/windows/
+PYTHON_VERSION=3.6.8  # override setting in base.sh
 
 if [ ! -z "$1" ]; then
     to_build="$1"
@@ -132,14 +137,22 @@ prepare_wine() {
         pushd "$here"
         here=`pwd`
         # Please update these carefully, some versions won't work under Wine
+
+        # !!! WARNING !!! READ THIS BEFORE UPGRADING NSIS
+        # NSIS has a bug in its icon group generation code that causes builds that have not exactly 7 icons to include uninitialized memory.
+        # If you upgrade NSIS, you need to check if the bug still exists in Source/icon.cpp line 267:
+        # https://sourceforge.net/p/nsis/code/HEAD/tree/NSIS/tags/v3021/Source/icon.cpp#l267
+        # Where they are incorrectly using order.size() instead of icon.size() to allocate the buffer and also don't zero the memory.
+        # If the bug hasn't been fixed, you need to check the NSIS generated uninstaller for number of icons and match that count exactly in your .ico file.
+        # See: https://github.com/spesmilo/electrum/commit/570c0aeca39e56c742b77380ec274d178d660c29
         NSIS_URL='https://github.com/cculianu/Electron-Cash-Build-Tools/releases/download/v1.0/nsis-3.02.1-setup.exe'
         NSIS_SHA256=736c9062a02e297e335f82252e648a883171c98e0d5120439f538c81d429552e
 
-        LIBUSB_URL='https://github.com/cculianu/Electron-Cash-Build-Tools/releases/download/v1.0/libusb-1.0.21.7z'
-        LIBUSB_SHA256=acdde63a40b1477898aee6153f9d91d1a2e8a5d93f832ca8ab876498f3a6d2b8
+        LIBUSB_REPO='https://github.com/libusb/libusb.git'
+        LIBUSB_COMMIT=a5990ab10f68e5ec7498f627d1664b1f842fec4e
 
         PYINSTALLER_REPO='https://github.com/EchterAgo/pyinstaller.git'
-        PYINSTALLER_COMMIT=d1cdd726d6a9edc70150d5302453fb90fdd09bf2
+        PYINSTALLER_COMMIT=1a8b2d47c277c451f4e358d926a47c096a5615ec
 
         #DebugSatochip pyscard
         PYSCARD_FILENAME=pyscard-1.9.8-cp36-cp36m-win32.whl #python32-bits
@@ -147,7 +160,7 @@ prepare_wine() {
         PYSCARD_SHA256=4641b5db53fb3562671b7b7c685ddf8f715180e2809106fb2a9361dfad553b4b        
         
         ## These settings probably don't need change
-        export WINEPREFIX=/opt/wine64
+        export WINEPREFIX=$HOME/wine64
         #export WINEARCH='win32'
         export WINEDEBUG=-all
 
@@ -162,11 +175,11 @@ prepare_wine() {
         wine 'wineboot'
 
         info "Cleaning tmp"
-        rm -rf tmp
-        mkdir -p tmp
+        rm -rf $HOME/tmp
+        mkdir -p $HOME/tmp
         info "done"
 
-        cd tmp
+        pushd $HOME/tmp
 
         # note: you might need "sudo apt-get install dirmngr" for the following
         # if the verification fails you might need to get more keys from python.org
@@ -184,7 +197,7 @@ prepare_wine() {
             wget "https://www.python.org/ftp/python/$PYTHON_VERSION/win32/${msifile}.msi"
             wget "https://www.python.org/ftp/python/$PYTHON_VERSION/win32/${msifile}.msi.asc"
             verify_signature "${msifile}.msi.asc" $KEYRING_PYTHON_DEV
-            wine msiexec /i "${msifile}.msi" /qb TARGETDIR=C:/python$PYTHON_VERSION || fail "Failed to install Python component: ${msifile}"
+            wine msiexec /i "${msifile}.msi" /qn TARGETDIR=$PYHOME || fail "Failed to install Python component: ${msifile}"
         done
 
         info "Upgrading pip ..."
@@ -205,9 +218,13 @@ prepare_wine() {
             git init
             git remote add origin $PYINSTALLER_REPO
             git fetch --depth 1 origin $PYINSTALLER_COMMIT
-            git checkout FETCH_HEAD
+            git checkout -b pinned FETCH_HEAD
             rm -fv PyInstaller/bootloader/Windows-*/run*.exe || true  # Make sure EXEs that came with repo are deleted -- we rebuild them and need to detect if build failed
-            echo "const char *ec_tag = \"tagged by Electron-Cash@$GIT_COMMIT_HASH\";" >> ./bootloader/src/pyi_main.c
+            if [ ${PYI_SKIP_TAG:-0} -eq 0 ] ; then
+                echo "const char *ec_tag = \"tagged by Electron-Cash@$GIT_COMMIT_HASH\";" >> ./bootloader/src/pyi_main.c
+            else
+                warn "Skipping PyInstaller tag"
+            fi
             pushd bootloader
             # If switching to 64-bit Windows, edit CC= below
             python3 ./waf all CC=i686-w64-mingw32-gcc CFLAGS="-Wno-stringop-overflow -static"
@@ -224,7 +241,7 @@ prepare_wine() {
         wine "C:/python$PYTHON_VERSION/scripts/pyinstaller.exe" -v || fail "Pyinstaller installed but cannot be run."
 
         info "Installing Packages from requirements-binaries ..."
-        $PYTHON -m pip install --no-warn-script-location -r ../../deterministic-build/requirements-binaries.txt || fail "Failed to install requirements-binaries"
+        $PYTHON -m pip install --no-warn-script-location -r $here/../deterministic-build/requirements-binaries.txt || fail "Failed to install requirements-binaries"
 
         info "Installing NSIS ..."
         # Install NSIS installer
@@ -232,36 +249,44 @@ prepare_wine() {
         verify_hash nsis.exe $NSIS_SHA256
         wine nsis.exe /S || fail "Could not run nsis"
 
-        info "Installing libusb ..."
-        wget -O libusb.7z "$LIBUSB_URL"
-        verify_hash libusb.7z "$LIBUSB_SHA256"
-        7z x -olibusb libusb.7z
-        mkdir -p $WINEPREFIX/drive_c/tmp
-        cp libusb/MS32/dll/libusb-1.0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libusb.dll to its destination"
+        info "Compiling libusb ..."
+        mkdir libusb
+        (
+            cd libusb
+            # Shallow clone
+            git init
+            git remote add origin $LIBUSB_REPO
+            git fetch --depth 1 origin $LIBUSB_COMMIT
+            git checkout -b pinned FETCH_HEAD
+            export SOURCE_DATE_EPOCH=1530212462
+            echo "libusb_1_0_la_LDFLAGS += -Wc,-static" >> libusb/Makefile.am
+            ./bootstrap.sh || fail "Could not bootstrap libusb"
+            host="i686-w64-mingw32"
+            LDFLAGS="-Wl,--no-insert-timestamp" ./configure \
+                --host=$host \
+                --build=x86_64-pc-linux-gnu || fail "Could not run ./configure for libusb"
+            make -j4 || fail "Could not build libusb"
+            ${host}-strip libusb/.libs/libusb-1.0.dll
+        ) || fail "libusb build failed"
 
-        # libsecp256k1 & libzbar
+        # libsecp256k1, libzbar & libusb
         mkdir -p $WINEPREFIX/drive_c/tmp
         cp "$here"/../secp256k1/libsecp256k1.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libsecp to its destination"
         cp "$here"/../zbar/libzbar-0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libzbar to its destination"
-        
+        cp libusb/libusb/.libs/libusb-1.0.dll $WINEPREFIX/drive_c/tmp/ || fail "Could not copy libusb to its destination"
+
         info "Installing pyscard..." #DebugSatochip 
         wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
         verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
         $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
         
-        popd
+        popd  # out of homedir/tmp
+        popd  # out of $here
 
     ) || fail "Could not prepare Wine"
     info "Wine is configured."
 }
 prepare_wine
-
-info "Resetting modification time in C:\Python..."
-# (Because of some bugs in pyinstaller)
-pushd /opt/wine64/drive_c/python*
-find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
-popd
-ls -l /opt/wine64/drive_c/python*
 
 build_the_app() {
     info "Building $PACKAGE ..."
@@ -273,7 +298,7 @@ build_the_app() {
 
         NAME_ROOT=$PACKAGE  # PACKAGE comes from ../base.sh
         # These settings probably don't need any change
-        export WINEPREFIX=/opt/wine64
+        export WINEPREFIX=$HOME/wine64
         export WINEDEBUG=-all
         export PYTHONDONTWRITEBYTECODE=1
 
@@ -298,7 +323,6 @@ build_the_app() {
         find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
         popd  # go back to $here
 
-        cp "$here"/../../LICENCE "$here"/tmp
         cp -r "$here"/../electrum-locale/locale $WINEPREFIX/drive_c/electroncash/lib/
 
         # Install frozen dependencies
@@ -312,10 +336,22 @@ build_the_app() {
 
         rm -rf dist/
 
+        info "Resetting modification time in C:\Python..."
+        # (Because we just installed a bunch of stuff)
+        pushd $HOME/wine64/drive_c/python$PYTHON_VERSION
+        find -exec touch -d '2000-11-11T11:11:11+00:00' {} +
+        ls -l
+        popd
+
         # build standalone and portable versions
         info "Running Pyinstaller to build standalone and portable .exe versions ..."
-        wine "C:/python$PYTHON_VERSION/scripts/pyinstaller.exe" --noconfirm --ascii --name $NAME_ROOT-$VERSION -w deterministic.spec || fail "Pyinstaller failed"
+        wine "C:/python$PYTHON_VERSION/scripts/pyinstaller.exe" --noconfirm --ascii --name $NAME_ROOT -w deterministic.spec || fail "Pyinstaller failed"
 
+        # rename the output files
+        pushd dist
+        mv $NAME_ROOT.exe $NAME_ROOT-$VERSION.exe
+        mv $NAME_ROOT-portable.exe $NAME_ROOT-$VERSION-portable.exe
+        popd
 
         # set timestamps in dist, in order to make the installer reproducible
         pushd dist
@@ -331,6 +367,9 @@ build_the_app() {
         cd dist
         #mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
         mv Electron-Cash-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory" #Satochip 
+
+        ls -la *.exe
+        sha256sum *.exe
 
         popd
 

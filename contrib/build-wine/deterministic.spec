@@ -138,8 +138,7 @@ exe_standalone = EXE(
     upx=False,
     manifest=home+'contrib/build-wine/manifest.xml',
     icon=home+'icons/electron.ico',
-    console=True) #Satochip True
-
+    console=False)
 
 exe_portable = EXE(
     pyz,
@@ -152,7 +151,7 @@ exe_portable = EXE(
     upx=False,
     manifest=home+'contrib/build-wine/manifest.xml',
     icon=home+'icons/electron.ico',
-    console=True) #Satochip True
+    console=False)
 
 #####
 # exe and separate files that NSIS uses to build installer "setup" exe

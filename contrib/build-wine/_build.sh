@@ -278,7 +278,7 @@ prepare_wine() {
         info "Installing pyscard..." #DebugSatochip 
         wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
         verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
-        $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
+        $PYTHON -m pip install $PYSCARD_FILENAME 
         
         popd  # out of homedir/tmp
         popd  # out of $here

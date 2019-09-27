@@ -303,6 +303,7 @@ build_the_app() {
         export PYTHONDONTWRITEBYTECODE=1
 
         PYHOME=c:/python$PYTHON_VERSION
+        PYSCARD= $PYHOME/Lib/site-packages/smartcard/scard #satochip
         PYTHON="wine $PYHOME/python.exe -OO -B"
 
         pushd "$here"/../electrum-locale
@@ -346,6 +347,7 @@ build_the_app() {
         # build standalone and portable versions
         info "Running Pyinstaller to build standalone and portable .exe versions ..."
         wine "C:/python$PYTHON_VERSION/scripts/pyinstaller.exe" --noconfirm --ascii --name $NAME_ROOT -w deterministic.spec || fail "Pyinstaller failed"
+        #wine "C:/python$PYTHON_VERSION/scripts/pyinstaller.exe" --noconfirm --ascii --name $NAME_ROOT --paths $PYSCARD -w deterministic.spec || fail "Pyinstaller failed" 
 
         # rename the output files
         pushd dist

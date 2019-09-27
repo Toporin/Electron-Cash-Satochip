@@ -1,7 +1,6 @@
 # -*- mode: python3 -*-
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs
-from  _build.sh import PYHOME
 
 import sys
 for i, x in enumerate(sys.argv):
@@ -45,6 +44,8 @@ binaries += [('C:/tmp/libzbar-0.dll', '.')]
 # Workaround for "Retro Look":
 binaries += [b for b in collect_dynamic_libs('PyQt5') if 'qwindowsvista' in b[0]]
 
+binaries += [('C:/python*/Lib/site-packages/smartcard/scard/_scard.cp36-win32.pyd', '.')] #debugsatochip
+
 datas = [
     (home+'lib/currencies.json', 'electroncash'),
     (home+'lib/servers.json', 'electroncash'),
@@ -53,12 +54,14 @@ datas = [
     (home+'lib/locale', 'electroncash/locale'),
     (home+'gui/qt/data/ecsupplemental_win.ttf', 'electroncash_gui/qt/data'),
     (home+'plugins', 'electroncash_plugins'),
-    (PYHOME+'\\Lib\\site-packages\\smartcard\\scard\\_scard.cp36-win32.pyd', '.\\smartcard\\scard\\'), #Satochip
+    #(PYHOME+'\\Lib\\site-packages\\smartcard\\scard\\_scard.cp36-win32.pyd', '.\\smartcard\\scard\\'), #Satochip
+    #(_scard.cp36-win32.pyd', '.\\smartcard\\scard\\'), #debugsatochip
 ]
 datas += collect_data_files('trezorlib')
 datas += collect_data_files('btchip')
 datas += collect_data_files('keepkeylib')
 datas += collect_data_files('mnemonic')  # wordlists used by keepkeylib from lib mnemonic
+#datas += collect_data_files('smartcard') #debugsatochip
 
 # We don't put these files in to actually include them in the script but to make the Analysis method scan them for imports
 a = Analysis([home+'electron-cash',

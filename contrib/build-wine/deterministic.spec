@@ -1,6 +1,7 @@
 # -*- mode: python3 -*-
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_dynamic_libs
+from  _build.sh import PYHOME
 
 import sys
 for i, x in enumerate(sys.argv):
@@ -10,7 +11,7 @@ for i, x in enumerate(sys.argv):
 else:
     raise BaseException('no name')
 
-PYHOME = 'c:/python3.6.8'
+#PYHOME = 'c:/python3.6.8' #satochip
 home = 'C:\\electroncash\\'
 
 # see https://github.com/pyinstaller/pyinstaller/issues/2005

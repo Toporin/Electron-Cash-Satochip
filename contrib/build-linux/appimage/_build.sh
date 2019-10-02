@@ -37,20 +37,6 @@ verify_hash "$CACHEDIR/appimagetool" "d918b4df547b388ef253f3c9e7f6529ca81a885395
 download_if_not_exist "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" "https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
 verify_hash "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" $PYTHON_SRC_TARBALL_HASH
 
-#swig for pyscard
-download_if_not_exist  "$CACHEDIR/swig.tar.gz" "https://sourceforge.net/projects/swig/files/swig/swig-4.0.1/swig-4.0.1.tar.gz"
-verify_hash  "$CACHEDIR/swig.tar.gz" "7a00b4d0d53ad97a14316135e2d702091cd5f193bb58bcfcd8bc59d41e7887a9"
-download_if_not_exist "$CACHEDIR/pcsc.tar.bz2" "https://pcsclite.apdu.fr/files/pcsc-lite-1.8.25.tar.bz2" 
-verify_hash "$CACHEDIR/pcsc.tar.bz2" "d76d79edc31cf76e782b9f697420d3defbcc91778c3c650658086a1b748e8792"
-
-info "Building Swig"
-tar xf "$CACHEDIR/swig.tar.gz" -C "$BUILDDIR"
-(
-    cd "$BUILDDIR/swig"
-    ./configure #--prefix=$BUILDDIR/swigbuild
-    $ make
-    $ make install
-)
 
 info "Building Python"
 tar xf "$CACHEDIR/Python-$PYTHON_VERSION.tar.xz" -C "$BUILDDIR"
@@ -142,6 +128,7 @@ mkdir -p "$CACHEDIR/pip_cache"
 "$python" -m pip install --no-warn-script-location --cache-dir "$CACHEDIR/pip_cache" -r "$CONTRIB/deterministic-build/requirements.txt"
 "$python" -m pip install --no-warn-script-location --cache-dir "$CACHEDIR/pip_cache" -r "$CONTRIB/deterministic-build/requirements-binaries.txt"
 "$python" -m pip install --no-warn-script-location --cache-dir "$CACHEDIR/pip_cache" -r "$CONTRIB/deterministic-build/requirements-hw.txt"
+"$python" -m pip install --no-warn-script-location --cache-dir "$CACHEDIR/pip_cache" -r "$CONTRIB/deterministic-build/requirements-satochip.txt"
 "$python" -m pip install --no-warn-script-location --cache-dir "$CACHEDIR/pip_cache" "$PROJECT_ROOT"
 
 

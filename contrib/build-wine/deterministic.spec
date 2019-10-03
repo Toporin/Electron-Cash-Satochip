@@ -10,7 +10,6 @@ for i, x in enumerate(sys.argv):
 else:
     raise BaseException('no name')
 
-PYHOME = 'c:/python3.6.8'
 home = 'C:\\electroncash\\'
 
 # see https://github.com/pyinstaller/pyinstaller/issues/2005
@@ -44,6 +43,8 @@ binaries += [('C:/tmp/libzbar-0.dll', '.')]
 # Workaround for "Retro Look":
 binaries += [b for b in collect_dynamic_libs('PyQt5') if 'qwindowsvista' in b[0]]
 
+binaries += [('C:/python*/Lib/site-packages/smartcard/scard/_scard.cp36-win32.pyd', '.')] #satochip
+
 datas = [
     (home+'lib/currencies.json', 'electroncash'),
     (home+'lib/servers.json', 'electroncash'),
@@ -52,7 +53,6 @@ datas = [
     (home+'lib/locale', 'electroncash/locale'),
     (home+'gui/qt/data/ecsupplemental_win.ttf', 'electroncash_gui/qt/data'),
     (home+'plugins', 'electroncash_plugins'),
-    (PYHOME+'\\Lib\\site-packages\\smartcard\\scard\\_scard.cp36-win32.pyd', '.\\smartcard\\scard\\'), #Satochip
 ]
 datas += collect_data_files('trezorlib')
 datas += collect_data_files('btchip')
@@ -138,8 +138,7 @@ exe_standalone = EXE(
     upx=False,
     manifest=home+'contrib/build-wine/manifest.xml',
     icon=home+'icons/electron.ico',
-    console=True) #Satochip True
-
+    console=False)
 
 exe_portable = EXE(
     pyz,
@@ -152,7 +151,7 @@ exe_portable = EXE(
     upx=False,
     manifest=home+'contrib/build-wine/manifest.xml',
     icon=home+'icons/electron.ico',
-    console=True) #Satochip True
+    console=False)
 
 #####
 # exe and separate files that NSIS uses to build installer "setup" exe

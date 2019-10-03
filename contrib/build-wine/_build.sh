@@ -278,7 +278,7 @@ prepare_wine() {
         info "Installing pyscard..." #DebugSatochip 
         wget -O $PYSCARD_FILENAME "$PYSCARD_URL"
         verify_hash $PYSCARD_FILENAME "$PYSCARD_SHA256"
-        $PYTHON -m pip install $PYSCARD_FILENAME #"$CACHEDIR/$PYSCARD_FILENAME"
+        $PYTHON -m pip install $PYSCARD_FILENAME 
         
         popd  # out of homedir/tmp
         popd  # out of $here
@@ -365,9 +365,8 @@ build_the_app() {
         wine "$WINEPREFIX/drive_c/Program Files (x86)/NSIS/makensis.exe" /DPRODUCT_VERSION=$VERSION electron-cash.nsi || fail "makensis failed"
 
         cd dist
-        #mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
-        mv Electron-Cash-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory" #Satochip 
-
+        mv $NAME_ROOT-setup.exe $NAME_ROOT-$VERSION-setup.exe  || fail "Failed to move $NAME_ROOT-$VERSION-setup.exe to the output dist/ directory"
+        
         ls -la *.exe
         sha256sum *.exe
 
